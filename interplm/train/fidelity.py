@@ -73,10 +73,10 @@ def calculate_loss_recovered(ce_autoencoder, ce_identity, ce_zero_ablation):
     loss_recovered = 1 - (numerator / denominator)
 
     # Clip the result to be between 0 and 1
-    loss_recovered = np.clip(loss_recovered, 0, 1)
+    loss_recovered = np.clip(loss_recovered, 0, 1).item()
 
     # Convert to percentage
-    return loss_recovered * 100
+    return loss_recovered * 100.0
 
 
 class ESMFidelityFunction(EvaluationManager):
