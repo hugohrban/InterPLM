@@ -73,10 +73,10 @@ def calculate_loss_recovered(ce_autoencoder, ce_identity, ce_zero_ablation):
     loss_recovered = 1 - (numerator / denominator)
 
     # Clip the result to be between 0 and 1
-    loss_recovered = np.clip(loss_recovered, 0, 1)
+    loss_recovered = np.clip(loss_recovered, 0, 1).item()
 
     # Convert to percentage
-    return loss_recovered * 100
+    return loss_recovered * 100.0
 
 
 class ESMFidelityFunction(EvaluationManager):
@@ -126,7 +126,7 @@ class ESMFidelityFunction(EvaluationManager):
             batch_mask = (batch_tokens != alphabet.padding_idx).to(int)
             self.tokenized_batches.append((batch_tokens, batch_mask))
 
-        self.nnsight_model = NNsight(self.model, device=self.device)
+        self.nnsight_model = NNsight(self.model).to(self.device)
         self.layer_idx = self.layer_idx
 
         self.orig_loss, self.zero_loss = self._CE_for_orig_and_zero_ablation(
@@ -177,7 +177,7 @@ class ESMFidelityFunction(EvaluationManager):
                 calculate_cross_entropy(zero_logits, batch_tokens, batch_attn_mask)
             )
 
-        return np.mean(orig_losses), np.mean(zero_losses)
+        return np.mean(orig_losses).item(), np.mean(zero_losses).item()
 
     def _CE_from_sae_recon(self, tokenized_batches, sae_model):
         """Calculate cross entropy using SAE reconstructions."""
@@ -210,4 +210,4 @@ class ESMFidelityFunction(EvaluationManager):
                 calculate_cross_entropy(sae_logits, batch_tokens, batch_attn_mask)
             )
 
-        return np.mean(sae_losses)
+        return np.mean(sae_losses).item()
