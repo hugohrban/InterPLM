@@ -414,7 +414,7 @@ class ProteinFeatureVisualizer:
             if plot_of_feat_acts is not None:
                 st.plotly_chart(
                     plot_of_feat_acts,
-                    use_container_width=True,
+                    width='stretch',
                 )
             else:
                 st.write("No activations found for this feature in random sample.")
@@ -526,7 +526,7 @@ class ProteinFeatureVisualizer:
         # Display as interactive table
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=400,  # Fixed height with scrolling
         )
@@ -575,7 +575,7 @@ class ProteinFeatureVisualizer:
         # Display as interactive table
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "Concept": st.column_config.TextColumn(
@@ -670,7 +670,7 @@ class ProteinFeatureVisualizer:
         )
         st.subheader("**Structural vs Sequential**", help=struct_v_seq_help)
         st.plotly_chart(
-            plot, use_container_width=True
+            plot, width='stretch'
         )
 
     def _plot_activation_consistency(self, dash_data: Dict, feature_id: int):
@@ -691,7 +691,7 @@ class ProteinFeatureVisualizer:
             help="Shows the consistency of feature activation across and within proteins.",
         )
         st.plotly_chart(
-            plot, use_container_width=True
+            plot, width='stretch'
         )
 
     def _plot_umap(self, dash_data: Dict, feature_id: int):
@@ -712,7 +712,7 @@ class ProteinFeatureVisualizer:
         )
         st.plotly_chart(
             plot,
-            use_container_width=True,
+            width='stretch',
         )
 
     def _display_swissprot_concepts(self, dash_data: Dict, feature_id: int, layer: int):
@@ -817,7 +817,7 @@ class ProteinFeatureVisualizer:
                     with col3:
                         st.plotly_chart(
                             palette_to_viz,
-                            use_container_width=True,
+                            width='stretch',
                         )
                 else:
                     col1, col2 = st.columns([3, 5])
@@ -831,7 +831,7 @@ class ProteinFeatureVisualizer:
                             protein,
                             "Amino Acids",
                         ),
-                        use_container_width=True,
+                        width='stretch',
                     )
 
                 with col2:
