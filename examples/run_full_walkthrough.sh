@@ -49,7 +49,7 @@ MODEL_NAME="facebook/esm2_t6_8M_UR50D"
 BATCH_SIZE=32
 
 # Swiss-Prot annotation parameters
-ANNOTATION_INPUT="data/uniprotkb/swissprot_dense_annot_1k_subset.tsv.gz"
+ANNOTATION_INPUT="${INTERPLM_DATA}/annotations/uniprotkb/proteins.tsv.gz"
 MIN_REQUIRED_INSTANCES=25
 N_SHARDS=6
 
