@@ -1,7 +1,5 @@
 # Data
-data/cif/*
-data/dssp/*
-data/pdbs/*
+data/
 
 # Models
 models/

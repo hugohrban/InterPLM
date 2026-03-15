@@ -354,13 +354,13 @@ class SAETrainingRun:
 
     def _run_final_evaluation(self):
         """Run comprehensive evaluation at the end of training and save results."""
-        from interplm.train.fidelity import ESMFidelityConfig
+        from interplm.train.fidelity import ESMFidelityConfig, ProGenFidelityConfig
         import yaml
 
         # Only run if we have ESMFidelityConfig (which has model_name and layer info)
-        if not isinstance(self.evaluation_manager.config, ESMFidelityConfig):
-            print("\nSkipping final comprehensive evaluation (not using ESMFidelityConfig)")
-            print("To enable, use ESMFidelityConfig with eval_seq_path parameter")
+        if not isinstance(self.evaluation_manager.config, (ESMFidelityConfig, ProGenFidelityConfig)):
+            print("\nSkipping final comprehensive evaluation (not using ESMFidelityConfig or ProGenFidelityConfig)")
+            print("To enable, use ESMFidelityConfig or ProGenFidelityConfig with eval_seq_path parameter")
             return
 
         if self.evaluation_manager.config.eval_seq_path is None:

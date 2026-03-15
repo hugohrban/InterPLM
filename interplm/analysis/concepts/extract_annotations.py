@@ -172,18 +172,22 @@ def shard_protein_data(
     df: pd.DataFrame,
     output_dir: Path,
     n_shards: int,
+    overwrite: bool = False,
 ) -> None:
     """Split preprocessed data into shards for parallel processing."""
     # Split df into n_shards of roughly equal size
     np.random.seed(42)
     shards = np.array_split(df, n_shards)
     for shard_id, df_shard in enumerate(shards):
-        print(f"Processing shard {shard_id} of {n_shards}")
-        df_shard = df_shard.reset_index(drop=True)
-
         shard_dir = output_dir / f"shard_{shard_id}"
         shard_dir.mkdir(parents=True, exist_ok=True)
-        df_shard.to_csv(shard_dir / "protein_data.tsv", sep="\t", index=False)
+        tsv_path = shard_dir / "protein_data.tsv"
+        if tsv_path.exists() and not overwrite:
+            logger.info(f"Shard {shard_id} protein data already exists, skipping...")
+            continue
+        print(f"Processing shard {shard_id} of {n_shards}")
+        df_shard = df_shard.reset_index(drop=True)
+        df_shard.to_csv(tsv_path, sep="\t", index=False)
 
 
 def convert_shard_to_amino_acid_features(
@@ -235,9 +239,9 @@ def convert_shard_to_amino_acid_features(
     metadata = df.iloc[:, :3]
     metadata.to_csv(output_metadata, index=False)
 
-    # Save concept columns if they don't exist yet
+    # Save concept columns if they don't exist yet (or if overwriting)
     concept_col_file = output_dir / "uniprotkb_aa_concepts_columns.txt"
-    if not concept_col_file.exists():
+    if not concept_col_file.exists() or overwrite:
         columns = df.columns[3:]  # Skip metadata columns
         concept_col_file.write_text("\n".join(columns))
 
@@ -275,7 +279,7 @@ def main(
     # Preprocess data
     df = pd.read_csv(input_uniprot_path, sep="\t")
     df = preprocess_proteins(df, min_protein_length)
-    shard_protein_data(df, output_dir, n_shards)
+    shard_protein_data(df, output_dir, n_shards, overwrite=overwrite)
 
     # Dynamically determine which sub-categories are abundant enough to include
     categorical_options = enumerate_protein_subcategories(df, min_required_instances)

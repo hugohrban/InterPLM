@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from interplm.sae.inference import load_sae
 from interplm.embedders import get_embedder
-from interplm.train.fidelity import ESMFidelityConfig
+from interplm.train.fidelity import ESMFidelityConfig, ProGenFidelityConfig
 from interplm.utils import get_device
 
 
@@ -222,6 +222,8 @@ def evaluate_sae(
     # Load embedder
     print("Loading protein embedder...")
     embedder_type = "esm"
+    if "progen" in model_name:
+        embedder_type="progen"
 
     # MPS has known issues with ESM-2 producing NaN embeddings in loops
     # Force CPU for embedder if MPS is detected and user didn't specify device
@@ -233,7 +235,7 @@ def evaluate_sae(
 
     embedder = get_embedder(
         embedder_type,
-        model_name=f"facebook/{model_name}",
+        model_name=f"{model_name}",
         device=embedder_device
     )
     print(f"Embedder loaded: {embedder_type} on {embedder_device}")
@@ -288,7 +290,7 @@ def evaluate_sae(
         print("\n" + "=" * 70)
         print("3. DOWNSTREAM TASK FIDELITY")
         print("=" * 70)
-        print("This measures how well the SAE preserves ESM's ability to predict")
+        print("This measures how well the SAE preserves model's ability to predict")
         print("masked tokens. Higher is better (100% = perfect preservation).")
         print()
 
@@ -305,7 +307,8 @@ def evaluate_sae(
                     f.write(str(record.seq) + "\n")
 
         try:
-            fidelity_config = ESMFidelityConfig(
+            fidelity_config_cls = ESMFidelityConfig if embedder_type == "esm" else ProGenFidelityConfig
+            fidelity_config = fidelity_config_cls(
                 eval_seq_path=temp_seq_file,
                 model_name=model_name,
                 layer_idx=layer,

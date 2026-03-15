@@ -16,12 +16,13 @@ import yaml
 from esm import pretrained
 from nnsight import NNsight
 from tqdm import tqdm
-from transformers import EsmForMaskedLM
+from transformers import EsmForMaskedLM, AutoModelForCausalLM
 
 # from interplm.esm.embed import shuffle_individual_parameters  # Not available in public repo
-from interplm.sae.intervention import get_esm_output_with_intervention
+from interplm.sae.intervention import get_esm_output_with_intervention, get_progen_output_with_intervention
 from interplm.train.evaluation import EvaluationConfig, EvaluationManager
 from interplm.utils import get_device
+from interplm.embedders import get_embedder
 
 
 @dataclass
@@ -198,6 +199,142 @@ class ESMFidelityFunction(EvaluationManager):
             # Get reconstructions with unnormalize=True for injection into the model
             reconstructions = sae_model(orig_hidden, unnormalize=True)
             sae_logits, _ = get_esm_output_with_intervention(
+                self.model,
+                self.nnsight_model,
+                batch_tokens,
+                batch_attn_mask,
+                self.layer_idx,
+                reconstructions,
+            )
+
+            sae_losses.extend(
+                calculate_cross_entropy(sae_logits, batch_tokens, batch_attn_mask)
+            )
+
+        return np.mean(sae_losses).item()
+
+
+@dataclass
+class ProGenFidelityConfig(EvaluationConfig):
+    model_name: str | None = None
+    layer_idx: int | None = None
+    corrupt: bool = False
+
+    def build(self) -> "ProGenFidelityFunction":
+        return ProGenFidelityFunction(self)
+
+
+class ProGenFidelityFunction(EvaluationManager):
+    def __init__(
+        self,
+        eval_config: "ProGenFidelityConfig",
+    ):
+        # The super class just sets the config
+        super().__init__(eval_config)
+
+        print("Prepping loss fidelity_fn")
+        self.device = get_device()
+
+        # Extract config values
+        self.model_name = eval_config.model_name
+        self.eval_seq_path = eval_config.eval_seq_path
+        self.layer_idx = eval_config.layer_idx
+        self.batch_size = eval_config.eval_batch_size or 8
+        self.corrupt = eval_config.corrupt
+
+        self.embedder = get_embedder("progen", model_name=self.model_name, device=self.device)
+        self.model = self.embedder.model
+
+        if self.corrupt:
+            raise NotImplementedError(
+                "The 'corrupt' parameter requires shuffle_individual_parameters() "
+                "which is not available in the public repo"
+            )
+
+        # Load evaluation sequences
+        with open(self.eval_seq_path, "r") as f:
+            data: list[str] = [line.strip() for line in f]
+
+        # Pre-tokenize and create batches
+        self.tokenized_batches = []
+        for i in range(0, len(data), self.batch_size):
+            batch_data = data[i : i + self.batch_size]
+            batch_tokens: torch.Tensor = self.embedder.tokenize(batch_data).input_ids
+            batch_mask: torch.Tensor = (batch_tokens != self.embedder.tokenizer.pad_token_id).to(int)
+            self.tokenized_batches.append((batch_tokens, batch_mask))
+
+        self.nnsight_model = NNsight(self.model).to(self.device)
+        self.layer_idx = self.layer_idx
+
+        self.orig_loss, self.zero_loss = self._CE_for_orig_and_zero_ablation(
+            self.tokenized_batches
+        )
+        print("Finished initializing ProGen2 Fidelity Function")
+
+    def _calculate_fidelity(self, sae_model) -> dict:
+        sae_loss = self._CE_from_sae_recon(self.tokenized_batches, sae_model)
+
+        loss_recovered = calculate_loss_recovered(
+            ce_autoencoder=sae_loss,
+            ce_identity=self.orig_loss,
+            ce_zero_ablation=self.zero_loss,
+        )
+
+        return {"pct_loss_recovered": loss_recovered, "CE_w_sae_patching": sae_loss}
+
+    def _CE_for_orig_and_zero_ablation(self, tokenized_batches):
+        """Calculate cross entropy for original and zero-ablated outputs."""
+        orig_losses, zero_losses = [], []
+
+        for batch_tokens, batch_attn_mask in tqdm(tokenized_batches):
+            batch_tokens = batch_tokens.to(self.device)
+            batch_attn_mask = batch_attn_mask.to(self.device)
+
+            orig_logits, orig_hidden = get_progen_output_with_intervention(
+                self.model,
+                self.nnsight_model,
+                batch_tokens,
+                batch_attn_mask,
+                self.layer_idx,
+            )
+
+            zero_logits, _ = get_progen_output_with_intervention(
+                self.model,
+                self.nnsight_model,
+                batch_tokens,
+                batch_attn_mask,
+                self.layer_idx,
+                torch.zeros_like(orig_hidden),
+            )
+
+            orig_losses.extend(
+                calculate_cross_entropy(orig_logits, batch_tokens, batch_attn_mask)
+            )
+            zero_losses.extend(
+                calculate_cross_entropy(zero_logits, batch_tokens, batch_attn_mask)
+            )
+
+        return np.mean(orig_losses).item(), np.mean(zero_losses).item()
+
+    def _CE_from_sae_recon(self, tokenized_batches, sae_model):
+        """Calculate cross entropy using SAE reconstructions."""
+        sae_losses = []
+
+        for batch_tokens, batch_attn_mask in tokenized_batches:
+            batch_tokens = batch_tokens.to(self.device)
+            batch_attn_mask = batch_attn_mask.to(self.device)
+
+            _, orig_hidden = get_progen_output_with_intervention(
+                self.model,
+                self.nnsight_model,
+                batch_tokens,
+                batch_attn_mask,
+                self.layer_idx,
+            )
+
+            # Get reconstructions with unnormalize=True for injection into the model
+            reconstructions = sae_model(orig_hidden, unnormalize=True)
+            sae_logits, _ = get_progen_output_with_intervention(
                 self.model,
                 self.nnsight_model,
                 batch_tokens,

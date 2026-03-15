@@ -1,6 +1,6 @@
 import torch
 from nnsight import NNsight
-from transformers import EsmForMaskedLM
+from transformers import EsmForMaskedLM, AutoModelForCausalLM
 
 
 def get_esm_submodule_and_access_method(nnsight_model: NNsight, hidden_layer_idx: int):
@@ -53,6 +53,54 @@ def get_esm_output_with_intervention(
             return orig_output.logits, orig_output.hidden_states[hidden_layer_idx]
 
         submodule, input_or_output = get_esm_submodule_and_access_method(
+            nnsight_model, hidden_layer_idx
+        )
+        with nnsight_model.trace(
+            batch_tokens, attention_mask=batch_attn_mask
+        ) as tracer:
+            embd_to_patch = (
+                submodule.input
+                if input_or_output == "input"
+                else submodule.output
+            )
+            embd_to_patch[:] = hidden_state_override
+            modified_logits = nnsight_model.output.logits.save()
+
+        return modified_logits, orig_output.hidden_states[hidden_layer_idx]
+
+
+def get_progen_submodule_and_access_method(nnsight_model: NNsight, hidden_layer_idx: int):
+    """Get the submodule at the given hidden layer index and the access method (input or output)
+    Analogous to esm function"""
+    encoder = nnsight_model.transformer
+    n_layers = len(encoder.h)
+    
+    if hidden_layer_idx > n_layers or hidden_layer_idx < 0:
+        raise ValueError(f"Hidden layer index {hidden_layer_idx} is out of bounds")
+    elif hidden_layer_idx == n_layers:
+        return encoder.ln_f, "output"
+    else:
+        return encoder.h[hidden_layer_idx], "input"
+
+
+def get_progen_output_with_intervention(
+    progen_model: AutoModelForCausalLM,
+    nnsight_model: NNsight,
+    batch_tokens: torch.Tensor,
+    batch_attn_mask: torch.Tensor,
+    hidden_layer_idx: int,
+    hidden_state_override: torch.Tensor | None = None,
+):
+    """Get model output with optional hidden state modification."""
+    with torch.no_grad():
+        orig_output = progen_model(
+            batch_tokens, attention_mask=batch_attn_mask, output_hidden_states=True
+        )
+
+        if hidden_state_override is None:
+            return orig_output.logits, orig_output.hidden_states[hidden_layer_idx]
+
+        submodule, input_or_output = get_progen_submodule_and_access_method(
             nnsight_model, hidden_layer_idx
         )
         with nnsight_model.trace(
