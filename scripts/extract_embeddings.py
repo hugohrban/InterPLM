@@ -22,25 +22,36 @@ def is_shard_done(fasta_file: Path, output_dir: Path, layers: List[int]) -> bool
     )
 
 
-def _worker(
-    fasta_file: Path,
-    output_dir: Path,
-    embedder_type: str,
-    model_name: str,
-    layers: List[int],
-    batch_size: int,
-    gpu_id: int,
-) -> str:
-    """Worker function for multi-GPU processing. Must be module-level for pickling."""
+# Module-level state for worker processes (one embedder per process, loaded once)
+_worker_embedder = None
+_worker_device = None
+
+
+def _init_worker(embedder_type: str, model_name: str, gpu_queue) -> None:
+    """Initializer run once per worker process. Loads the embedder onto its GPU."""
     import torch
     from interplm.embedders import get_embedder
 
-    device = f"cuda:{gpu_id}"
-    embedder = get_embedder(embedder_type, model_name=model_name, device=device)
+    global _worker_embedder, _worker_device
+    gpu_id = gpu_queue.get()
+    _worker_device = f"cuda:{gpu_id}"
+    print(f"[worker] Loading {embedder_type} on {_worker_device}...")
+    _worker_embedder = get_embedder(embedder_type, model_name=model_name, device=_worker_device)
+
+
+def _worker(
+    fasta_file: Path,
+    output_dir: Path,
+    layers: List[int],
+    batch_size: int,
+) -> str:
+    """Worker function for multi-GPU processing. Reuses the per-process embedder."""
+    import torch
+
     current_batch_size = batch_size
     while True:
         try:
-            embedder.embed_fasta_file_multiple_layers(
+            _worker_embedder.embed_fasta_file_multiple_layers(
                 fasta_file,
                 layers=layers,
                 output_dir=output_dir,
@@ -53,11 +64,11 @@ def _worker(
             torch.cuda.empty_cache()
             if current_batch_size <= 1:
                 raise RuntimeError(
-                    f"OOM on {fasta_file.name} with batch_size=1 on {device}"
+                    f"OOM on {fasta_file.name} with batch_size=1 on {_worker_device}"
                 )
             current_batch_size = max(1, current_batch_size // 2)
             print(
-                f"[OOM] {fasta_file.name} on {device}: "
+                f"[OOM] {fasta_file.name} on {_worker_device}: "
                 f"retrying with batch_size={current_batch_size}"
             )
 
@@ -176,23 +187,22 @@ def main(
             pending, output_dir, embedder_type, model_name, layers, batch_size, device
         )
     else:
-        print(f"Using {n_gpus} GPUs (round-robin shard assignment)")
+        print(f"Using {n_gpus} GPUs (one model loaded per GPU, kept resident)")
         ctx = multiprocessing.get_context("spawn")
+        gpu_queue = ctx.Queue()
+        for i in range(n_gpus):
+            gpu_queue.put(i)
         processed = 0
         failed = 0
-        with ProcessPoolExecutor(max_workers=n_gpus, mp_context=ctx) as executor:
+        with ProcessPoolExecutor(
+            max_workers=n_gpus,
+            mp_context=ctx,
+            initializer=_init_worker,
+            initargs=(embedder_type, model_name, gpu_queue),
+        ) as executor:
             future_to_shard = {
-                executor.submit(
-                    _worker,
-                    fasta_file,
-                    output_dir,
-                    embedder_type,
-                    model_name,
-                    layers,
-                    batch_size,
-                    idx % n_gpus,
-                ): fasta_file
-                for idx, fasta_file in enumerate(pending)
+                executor.submit(_worker, fasta_file, output_dir, layers, batch_size): fasta_file
+                for fasta_file in pending
             }
             for future in tqdm(
                 as_completed(future_to_shard), total=len(pending), desc="Shards"
