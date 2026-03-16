@@ -41,9 +41,42 @@ from interplm.train.training_run import SAETrainingRun
 from interplm.train.wandb_manager import WandbConfig
 
 
+def _auto_save_dir(
+    trainer_type: str,
+    expansion_factor: int,
+    steps: int,
+    batch_size: int,
+    lr: Optional[float],
+    l1_penalty: float,
+    k: int,
+    auxk_alpha: float,
+    target_l0: float,
+    sparsity_penalty: float,
+) -> Path:
+    """Generate a save directory name that encodes key hyperparameters."""
+    parts = [trainer_type, f"ef{expansion_factor}", f"steps{steps}", f"bs{batch_size}"]
+
+    if trainer_type == "relu":
+        effective_lr = lr if lr is not None else 2e-4
+        parts.append(f"lr{effective_lr:.0e}")
+        parts.append(f"l1-{l1_penalty:.0e}")
+    elif trainer_type in ("topk", "batch_topk"):
+        parts.append(f"k{k}")
+        parts.append(f"auxk-{auxk_alpha:.3f}")
+        if lr is not None:
+            parts.append(f"lr{lr:.0e}")
+    elif trainer_type == "jump_relu":
+        effective_lr = lr if lr is not None else 2e-4
+        parts.append(f"lr{effective_lr:.0e}")
+        parts.append(f"l0-{target_l0:.0f}")
+        parts.append(f"sp-{sparsity_penalty:.1f}")
+
+    return Path("trained_saes") / "_".join(parts)
+
+
 def main(
     embeddings_dir: Path,
-    save_dir: Path,
+    save_dir: Optional[Path] = None,
     # Architecture
     trainer_type: str = "relu",
     expansion_factor: int = 4,
@@ -87,12 +120,28 @@ def main(
         save_steps = steps + 1
         max_ckpts_to_keep = 0
 
-    # Build trainer config
+    # Resolve save directory
     trainer_type = trainer_type.lower()
+    if save_dir is None:
+        save_dir = _auto_save_dir(
+            trainer_type=trainer_type,
+            expansion_factor=expansion_factor,
+            steps=steps,
+            batch_size=batch_size,
+            lr=lr,
+            l1_penalty=l1_penalty,
+            k=k,
+            auxk_alpha=auxk_alpha,
+            target_l0=target_l0,
+            sparsity_penalty=sparsity_penalty,
+        )
+        print(f"No --save_dir specified. Using: {save_dir}")
+
+    # Build trainer config
     if trainer_type == "relu":
         trainer_cfg = ReLUTrainerConfig(
             expansion_factor=expansion_factor,
-            lr=lr,
+            lr=lr if lr is not None else 2e-4,
             steps=steps,
             warmup_steps=warmup_steps,
             decay_start=decay_start,
@@ -122,7 +171,7 @@ def main(
     elif trainer_type == "jump_relu":
         trainer_cfg = JumpReLUTrainerConfig(
             expansion_factor=expansion_factor,
-            lr=lr,
+            lr=lr if lr is not None else 2e-4,
             steps=steps,
             warmup_steps=warmup_steps,
             decay_start=decay_start,
