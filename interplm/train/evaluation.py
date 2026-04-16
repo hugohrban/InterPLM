@@ -16,12 +16,17 @@ class EvaluationConfig:
     eval_embd_dir: Path | None = None
     # Batch size for evaluation
     eval_batch_size: int | None = None
-    # Steps to evaluate on
+    # Steps to evaluate on (reconstruction/sparsity on held-out embeddings)
     eval_steps: int | None = None
+    # Steps between fidelity evaluations (nnsight intervention through LM)
+    fidelity_steps: int | None = None
+    # Number of batches to use per training-time fidelity call (None = all)
+    fidelity_n_batches: int | None = None
     # Normalization files for evaluation data (should match training)
     zscore_means_file: Path | None = None
     zscore_vars_file: Path | None = None
     target_dtype: torch.dtype = torch.float32
+    device: str | None = None  # Override device; None means auto-detect via get_device()
 
     def build(self) -> "EvaluationManager":
         return EvaluationManager(self)
@@ -31,6 +36,8 @@ class EvaluationManager:
     def __init__(self, eval_config: EvaluationConfig):
         self.config = eval_config
         self.eval_steps = eval_config.eval_steps
+        self.fidelity_steps = eval_config.fidelity_steps
+        self.fidelity_n_batches = eval_config.fidelity_n_batches
         self.eval_seq_path = eval_config.eval_seq_path
         self.eval_embd_dir = eval_config.eval_embd_dir
         self.eval_batch_size = eval_config.eval_batch_size
@@ -47,12 +54,19 @@ class EvaluationManager:
             else None
         )
 
-    def _calculate_fidelity(self, features: t.Tensor):
+    def _calculate_fidelity(self, sae_model, use_all_batches: bool = False):
         """By default, we don't calculate fidelity (subclass should override)"""
         return None
 
     def _should_run_evals_on_valid(self, step):
-        return self.eval_embd_dir is not None and step % self.eval_steps == 0
+        return (
+            self.eval_embd_dir is not None
+            and self.eval_steps is not None
+            and step % self.eval_steps == 0
+        )
+
+    def _should_run_fidelity(self, step):
+        return self.fidelity_steps is not None and step % self.fidelity_steps == 0
 
     def calculate_monitoring_metrics(
         self,
@@ -61,47 +75,45 @@ class EvaluationManager:
         reconstructions: t.Tensor,
         sae_model: Dictionary,
     ):
-        # Use namespaced metric names from the start
         metrics = {
             "performance/variance_explained": self._calculate_variance_explained(
                 activations, reconstructions
             ),
+            "performance/mse": self._calculate_mse(activations, reconstructions),
         }
-        
+
         # Only include l0 sparsity for non-BatchTopK SAEs (where it's meaningful)
-        # BatchTopK SAE always has exactly k active features
-        if not hasattr(sae_model, 'k'):  # Not a BatchTopK SAE
+        if not hasattr(sae_model, 'k'):
             metrics["performance/l0_sparsity"] = self._calculate_sparsity(features)
-            
-        # Only include fidelity if it's actually calculated (not None)
-        fidelity = self._calculate_fidelity(sae_model)
-        if fidelity is not None:
-            metrics["performance/fidelity"] = fidelity
+
+        metrics.update(self._calculate_feature_stats(features, sae_model))
 
         return metrics
 
+    def _calculate_mse(self, activations, reconstructions):
+        return t.mean((activations - reconstructions) ** 2).item()
+
     def _calculate_sparsity(self, features):
-        """Calculate sparsity-related metrics from feature activations.
-
-        Args:
-            features: Feature activations tensor from encoder
-
-        Returns:
-            dict: Dictionary of sparsity metrics
-        """
         n_nonzero_per_example = (features != 0).float().sum(dim=-1)
         return n_nonzero_per_example.mean().item()
 
+    def _calculate_feature_stats(self, features, sae_model):
+        """Dead features and activation frequency stats."""
+        feature_active = (features != 0).float().mean(dim=0)  # [dict_size]
+        dict_size = feature_active.shape[0]
+
+        dead_features = (feature_active == 0).sum().item()
+        highly_active = (feature_active > 0.5).sum().item()
+
+        return {
+            "features/dead": dead_features,
+            "features/dead_pct": (dead_features / dict_size) * 100,
+            "features/highly_active": highly_active,
+            "features/highly_active_pct": (highly_active / dict_size) * 100,
+            "features/mean_activation_freq": feature_active.mean().item() * 100,
+        }
+
     def _calculate_variance_explained(self, activations, reconstructed):
-        """Calculate variance-related metrics comparing original and reconstructed activations.
-
-        Args:
-            activations: Original input activations
-            reconstructed: Reconstructed activations from autoencoder
-
-        Returns:
-            dict: Dictionary of variance metrics
-        """
         total_variance = t.var(activations, dim=0).sum()
         residual_variance = t.var(activations - reconstructed, dim=0).sum()
         return (1 - residual_variance / total_variance).item()

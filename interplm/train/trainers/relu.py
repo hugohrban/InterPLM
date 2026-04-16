@@ -62,7 +62,7 @@ class ReLUTrainer(SAETrainer):
         self.decay_start = trainer_config.decay_start
         self.grad_clip_norm = trainer_config.grad_clip_norm
 
-        self.device = get_device()
+        self.device = trainer_config.device or get_device()
         self.ae.to(self.device)
 
         # Set sparsity warmup steps if it is None

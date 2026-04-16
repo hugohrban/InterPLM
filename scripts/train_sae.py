@@ -22,6 +22,7 @@ Usage:
         --wandb_project interplm --wandb_name my-run
 """
 
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,7 @@ from typing import Optional
 from tap import tapify
 
 from interplm.train.configs import TrainingRunConfig
+from interplm.train.ddp_utils import setup_ddp, teardown_ddp, is_main_process
 from interplm.train.checkpoint_manager import CheckpointConfig
 from interplm.train.data_loader import DataloaderConfig
 from interplm.train.evaluation import EvaluationConfig
@@ -89,12 +91,15 @@ def main(
     seed: int = 0,
     n_shards_to_include: Optional[int] = None,
     dry_run: bool = False,
+    device: Optional[str] = None,
     # ReLU-specific
     l1_penalty: float = 0.06,
+    l1_penalty_warmup_steps: Optional[int] = None,
     resample_steps: Optional[int] = None,
     # TopK / BatchTopK-specific
     k: int = 32,
     auxk_alpha: float = 1 / 32,
+    dead_feature_threshold: int = 10_000_000,
     # JumpReLU-specific
     target_l0: float = 20.0,
     sparsity_penalty: float = 1.0,
@@ -103,11 +108,15 @@ def main(
     embedder_type: str = "esm",
     model_name: Optional[str] = None,
     layer_idx: Optional[int] = None,
+    eval_steps: Optional[int] = None,
+    fidelity_steps: Optional[int] = None,
+    fidelity_n_batches: Optional[int] = 20,
     # W&B
     use_wandb: bool = False,
     wandb_entity: Optional[str] = None,
     wandb_project: Optional[str] = None,
     wandb_name: Optional[str] = None,
+    log_steps: Optional[int] = 100,
     # Checkpointing
     save_steps: int = 2_000,
     max_ckpts_to_keep: int = 1,
@@ -146,7 +155,9 @@ def main(
             warmup_steps=warmup_steps,
             decay_start=decay_start,
             l1_penalty=l1_penalty,
+            l1_penalty_warmup_steps=l1_penalty_warmup_steps,
             resample_steps=resample_steps,
+            device=device,
         )
     elif trainer_type == "topk":
         trainer_cfg = TopKTrainerConfig(
@@ -157,6 +168,7 @@ def main(
             decay_start=decay_start,
             k=k,
             auxk_alpha=auxk_alpha,
+            device=device,
         )
     elif trainer_type == "batch_topk":
         trainer_cfg = BatchTopKTrainerConfig(
@@ -167,6 +179,8 @@ def main(
             decay_start=decay_start,
             k=k,
             auxk_alpha=auxk_alpha,
+            dead_feature_threshold=dead_feature_threshold,
+            device=device,
         )
     elif trainer_type == "jump_relu":
         trainer_cfg = JumpReLUTrainerConfig(
@@ -177,6 +191,7 @@ def main(
             decay_start=decay_start,
             target_l0=target_l0,
             sparsity_penalty=sparsity_penalty,
+            device=device,
         )
     else:
         raise ValueError(
@@ -191,19 +206,27 @@ def main(
                 eval_seq_path=eval_seq_path,
                 model_name=model_name,
                 layer_idx=layer_idx,
+                eval_steps=eval_steps,
+                fidelity_steps=fidelity_steps,
+                fidelity_n_batches=fidelity_n_batches,
+                device=device,
             )
         elif embedder_type == "progen2":
             eval_cfg = ProGenFidelityConfig(
                 eval_seq_path=eval_seq_path,
                 model_name=model_name,
                 layer_idx=layer_idx,
+                eval_steps=eval_steps,
+                fidelity_steps=fidelity_steps,
+                fidelity_n_batches=fidelity_n_batches,
+                device=device,
             )
         else:
             raise ValueError(
                 f"Unknown embedder_type: {embedder_type!r}. Choose from: esm, progen2"
             )
     else:
-        eval_cfg = EvaluationConfig()
+        eval_cfg = EvaluationConfig(eval_steps=eval_steps, device=device)
 
     # Build remaining configs
     dataloader_cfg = DataloaderConfig(
@@ -211,6 +234,7 @@ def main(
         batch_size=batch_size,
         seed=seed,
         n_shards_to_include=n_shards_to_include,
+        device=device,
     )
 
     wandb_cfg = WandbConfig(
@@ -218,6 +242,7 @@ def main(
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
         wandb_name=wandb_name,
+        log_steps=log_steps,
     )
 
     def _run(actual_save_dir: Path):
@@ -233,6 +258,7 @@ def main(
             wandb_cfg=wandb_cfg,
             checkpoint_cfg=checkpoint_cfg,
         )
+        print(f"Training run configuration:\n{config}")
         SAETrainingRun.from_config(config).run()
 
     if dry_run:

@@ -40,7 +40,7 @@ fi
 # CHECKPOINT MECHANISM
 # ============================================
 
-CHECKPOINT_DIR="$INTERPLM_DATA/.checkpoints"
+CHECKPOINT_DIR="$INTERPLM_DATA/.checkpoints/esm"
 mkdir -p "$CHECKPOINT_DIR"
 
 step_done() { [ -f "$CHECKPOINT_DIR/$1" ]; }
@@ -71,7 +71,7 @@ VALID_SHARD_START=0; VALID_SHARD_END=$((N_SHARDS/2 - 1)); TEST_SHARD_START=$((N_
 
 # Output directories
 MODEL_DIR="models/walkthrough_model"
-RESULTS_DIR="results/valid_counts"
+RESULTS_DIR="results/valid_counts_esm"
 DASHBOARD_NAME="walkthrough"
 
 echo "Configuration:"

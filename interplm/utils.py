@@ -11,11 +11,17 @@ def get_device() -> str:
     Note: MPS (Apple Silicon GPU) is intentionally disabled as it has been
     found to be unreliable.
 
+    In DDP mode torchrun sets the LOCAL_RANK environment variable; we use it
+    to pin each process to its own GPU (cuda:0, cuda:1, …).  When LOCAL_RANK
+    is not set (single-GPU or CPU runs) this behaves exactly as before.
+
     Returns:
-        "cuda" if NVIDIA GPU available, else "cpu"
+        "cuda:N" if NVIDIA GPU available (N = LOCAL_RANK, default 0), else "cpu"
     """
+    import os
     if torch.cuda.is_available():
-        return "cuda"
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        return f"cuda:{local_rank}"
     # MPS disabled - unreliable
     # elif torch.backends.mps.is_available():
     #     return "mps"

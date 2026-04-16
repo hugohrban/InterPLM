@@ -57,6 +57,7 @@ def _worker(
                 output_dir=output_dir,
                 batch_size=current_batch_size,
             )
+            print(f"[✅] {fasta_file.name} with batch_size={current_batch_size} on {_worker_device}")
             return fasta_file.name
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             if isinstance(e, RuntimeError) and "out of memory" not in str(e).lower():
@@ -171,7 +172,7 @@ def main(
         return
 
     if dry_run:
-        pending = pending[:3]
+        pending = pending[:12]
         print(f"[DRY RUN] Processing only {len(pending)} shard(s) to test batch size")
 
     print(f"Extracting embeddings for layers: {layers}")

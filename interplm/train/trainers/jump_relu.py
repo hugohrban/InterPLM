@@ -56,7 +56,7 @@ class JumpReLUTrainer(SAETrainer):
         self.sparsity_warmup_steps = trainer_config.sparsity_warmup_steps
         self.target_l0 = trainer_config.target_l0
 
-        self.device = get_device()
+        self.device = trainer_config.device or get_device()
 
         self.ae = JumpReLUSAE(
             activation_dim=trainer_config.activation_dim,

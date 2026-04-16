@@ -19,6 +19,7 @@ class SAETrainerConfig(ABC):
     resample_steps: int | None = None
     normalize_to_sqrt_d: bool = False # previously apply_unit_normalization
     grad_clip_norm: float | None = 1.0  # Gradient clipping norm (None = no clipping)
+    device: str | None = None  # Override device; None means auto-detect via get_device()
 
     def set_and_validate_activation_dim(self, activation_dim: int):
         self.activation_dim = activation_dim

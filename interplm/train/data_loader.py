@@ -49,6 +49,7 @@ class DataloaderConfig:
     zscore_means_file: Path | None = None
     zscore_vars_file: Path | None = None
     target_dtype: torch.dtype = torch.float32
+    device: str | None = None  # Override device; None means auto-detect via get_device()
 
     def build(self) -> "ActivationsDataLoader":
         return ActivationsDataLoader(self)
@@ -476,7 +477,7 @@ class ActivationsDataLoader(DataLoader):
             zscore_unnormalizer=zscore_unnormalizer,
         )
 
-        device = get_device()
+        device = dataloader_config.device or get_device()
 
         def collate_fn(batch):
             # Always return single tensor (unnormalized fp32 data)
@@ -490,12 +491,32 @@ class ActivationsDataLoader(DataLoader):
                 acts_dataset, range(self.config.samples_to_skip, len(acts_dataset))
             )
 
+        # Use DistributedSampler when running under DDP so each rank sees a
+        # disjoint subset of the data.  Falls back to no sampler (single-GPU).
+        import torch.distributed as dist
+        from torch.utils.data import DistributedSampler
+
+        if dist.is_available() and dist.is_initialized():
+            sampler = DistributedSampler(
+                acts_dataset,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=False,   # ShardedActivationsDataset already shuffles per-shard
+                drop_last=True,
+            )
+        else:
+            sampler = None
+
         super().__init__(
             acts_dataset,
             batch_size=dataloader_config.batch_size,
             shuffle=False,
+            sampler=sampler,
             collate_fn=collate_fn,
         )
+
+        # Keep a reference so training_run.py can call sampler.set_epoch(epoch)
+        self.dist_sampler = sampler
 
 
 class AttributePreservingSubset(Subset):

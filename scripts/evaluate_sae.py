@@ -72,7 +72,7 @@ def calculate_sparsity_metrics(sae, embeddings):
         dict: Sparsity metrics
     """
     with torch.no_grad():
-        features = sae.encode(embeddings)
+        features = sae.encode(embeddings)   # [n_tokens, sae.dict_size]
 
         # L0 sparsity (average number of active features per token)
         l0_sparsity = (features != 0).float().sum(dim=-1).mean().item()
@@ -295,38 +295,38 @@ def evaluate_sae(
         print()
 
         # Create temporary file with sequences for fidelity eval
-        import tempfile
-        from Bio import SeqIO
+        # import tempfile
+        # from Bio import SeqIO
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            temp_seq_file = f.name
-            with open(fasta_file) as fasta_f:
-                for i, record in enumerate(SeqIO.parse(fasta_f, "fasta")):
-                    if max_proteins is not None and i >= max_proteins:
-                        break
-                    f.write(str(record.seq) + "\n")
+        # with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        #     temp_seq_file = f.name
+        #     with open(fasta_file) as fasta_f:
+        #         for i, record in enumerate(SeqIO.parse(fasta_f, "fasta")):
+        #             if max_proteins is not None and i >= max_proteins:
+        #                 break
+        #             f.write(str(record.seq) + "\n")
 
-        try:
-            fidelity_config_cls = ESMFidelityConfig if embedder_type == "esm" else ProGenFidelityConfig
-            fidelity_config = fidelity_config_cls(
-                eval_seq_path=temp_seq_file,
-                model_name=model_name,
-                layer_idx=layer,
-                eval_batch_size=fidelity_batch_size,
-            )
+        # try:
+        fidelity_config_cls = ESMFidelityConfig if embedder_type == "esm" else ProGenFidelityConfig
+        fidelity_config = fidelity_config_cls(
+            eval_seq_path=fasta_file,
+            model_name=model_name,
+            layer_idx=layer,
+            eval_batch_size=fidelity_batch_size,
+        )
 
-            fidelity_eval = fidelity_config.build()
-            fidelity_metrics = fidelity_eval._calculate_fidelity(sae)
-            results["fidelity"] = fidelity_metrics
+        fidelity_eval = fidelity_config.build()
+        fidelity_metrics = fidelity_eval._calculate_fidelity(sae)
+        results["fidelity"] = fidelity_metrics
 
-            for key, value in fidelity_metrics.items():
-                if "pct" in key:
-                    print(f"  {key}: {value:.2f}%")
-                else:
-                    print(f"  {key}: {value:.6f}")
-        finally:
-            import os
-            os.unlink(temp_seq_file)
+        for key, value in fidelity_metrics.items():
+            if "pct" in key:
+                print(f"  {key}: {value:.2f}%")
+            else:
+                print(f"  {key}: {value:.6f}")
+        # finally:
+        #     import os
+        #     os.unlink(temp_seq_file)
     else:
         print("\n(Skipping fidelity evaluation)")
 

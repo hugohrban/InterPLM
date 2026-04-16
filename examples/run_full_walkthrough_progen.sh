@@ -44,7 +44,7 @@ fi
 # ============================================
 
 BASE="$INTERPLM_DATA" # /walkthrough_progen2"
-CHECKPOINT_DIR="$BASE/.checkpoints"
+CHECKPOINT_DIR="$BASE/.checkpoints/progen"
 mkdir -p "$CHECKPOINT_DIR"
 
 step_done() { [ -f "$CHECKPOINT_DIR/$1" ]; }
@@ -75,7 +75,7 @@ VALID_SHARD_START=0; VALID_SHARD_END=$((N_SHARDS/2 - 1)); TEST_SHARD_START=$((N_
 
 # Output directories
 MODEL_DIR="models/walkthrough_model_progen"
-RESULTS_DIR="results/valid_counts"
+RESULTS_DIR="results/valid_counts_progen"
 DASHBOARD_NAME="walkthrough_progen2"
 
 echo "Configuration:"

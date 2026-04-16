@@ -63,7 +63,7 @@ def get_esm_output_with_intervention(
                 if input_or_output == "input"
                 else submodule.output
             )
-            embd_to_patch[:] = hidden_state_override
+            embd_to_patch[:] = hidden_state_override.contiguous()
             modified_logits = nnsight_model.output.logits.save()
 
         return modified_logits, orig_output.hidden_states[hidden_layer_idx]
@@ -111,7 +111,7 @@ def get_progen_output_with_intervention(
                 if input_or_output == "input"
                 else submodule.output
             )
-            embd_to_patch[:] = hidden_state_override
+            embd_to_patch[:] = hidden_state_override.contiguous()
             modified_logits = nnsight_model.output.logits.save()
 
         return modified_logits, orig_output.hidden_states[hidden_layer_idx]

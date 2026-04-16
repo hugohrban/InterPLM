@@ -70,7 +70,7 @@ class BatchTopKTrainer(SAETrainer):
             normalize_to_sqrt_d=trainer_config.normalize_to_sqrt_d,
         )
 
-        self.device = get_device()
+        self.device = trainer_config.device or get_device()
         self.ae.to(self.device)
 
         self.auxk_alpha = trainer_config.auxk_alpha

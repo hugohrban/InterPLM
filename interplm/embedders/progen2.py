@@ -65,20 +65,46 @@ class ProGen2(BaseEmbedder):
             transformer.get_head_mask = _get_head_mask
 
     def _fix_meta_attention_scale(self) -> None:
-        """Patch legacy ProGen attention scale tensors left on meta device."""
+        """Patch legacy ProGen attention buffers left on meta device or corrupted after loading.
+
+        Three persistent=False buffers are not saved in the checkpoint and must be
+        re-initialised after from_pretrained:
+          - scale_attn:   sqrt(head_dim) scaling factor
+          - bias:         lower-triangular causal mask  [1, 1, n_pos, n_pos]
+          - masked_bias:  large negative value added to masked positions (~-1e9)
+        """
         transformer = getattr(self.model, "transformer", None)
         if transformer is None or not hasattr(transformer, "h"):
             return
 
+        n_positions = self.model.config.n_positions
+
         for block in transformer.h:
             attn = getattr(block, "attn", None)
-            if attn is None or not hasattr(attn, "scale_attn"):
+            if attn is None:
                 continue
-            scale_attn = attn.scale_attn
-            if isinstance(scale_attn, torch.Tensor) and scale_attn.device.type == "meta":
-                attn.scale_attn = torch.sqrt(
-                    torch.tensor(attn.head_dim, dtype=torch.float32, device=self.device)
-                ).to(torch.get_default_dtype())
+
+            # Fix scale_attn
+            if hasattr(attn, "scale_attn"):
+                scale_attn = attn.scale_attn
+                if isinstance(scale_attn, torch.Tensor) and (
+                    scale_attn.device.type == "meta" or scale_attn.item() == 0.0
+                ):
+                    attn.scale_attn = torch.sqrt(
+                        torch.tensor(attn.head_dim, dtype=torch.float32, device=self.device)
+                    ).to(torch.get_default_dtype())
+
+            # Unconditionally reinitialize persistent=False buffers — they are not
+            # saved in the checkpoint and reliably end up corrupted after loading.
+            # bias:        lower-triangular causal mask [1, 1, n_pos, n_pos]
+            # masked_bias: large negative added to future positions (~-1e9)
+            if hasattr(attn, "bias"):
+                attn.bias = torch.tril(
+                    torch.ones((n_positions, n_positions), dtype=torch.bool, device=self.device)
+                ).view(1, 1, n_positions, n_positions)
+
+            if hasattr(attn, "masked_bias"):
+                attn.masked_bias = torch.tensor(-1e9, device=self.device)
 
     def load_model(self) -> None:
         """Load ProGen2 tokenizer and model from Hugging Face."""
@@ -131,15 +157,14 @@ class ProGen2(BaseEmbedder):
         for layer in layers:
             self._validate_layer(layer)
 
-        processed_sequences = [self.preprocess_sequence(seq) for seq in sequences]
         all_embeddings = {layer: [] for layer in layers}
-        num_batches = (len(processed_sequences) + batch_size - 1) // batch_size
-        batch_iterator = range(0, len(processed_sequences), batch_size)
+        num_batches = (len(sequences) + batch_size - 1) // batch_size
+        batch_iterator = range(0, len(sequences), batch_size)
         if num_batches > 1:
             batch_iterator = tqdm(batch_iterator, desc="Processing batches", total=num_batches)
 
         for i in batch_iterator:
-            batch_sequences = processed_sequences[i : i + batch_size]
+            batch_sequences = sequences[i : i + batch_size]
             if len(batch_sequences) == 0:
                 continue
 
@@ -155,7 +180,9 @@ class ProGen2(BaseEmbedder):
                 layer_output = hidden_states[layer].detach().cpu()
                 for seq_idx in range(layer_output.shape[0]):
                     seq_len = int(attention_mask[seq_idx].sum().item())
-                    seq_embeddings = layer_output[seq_idx, :seq_len, :]
+                    # seq_len includes the leading "1" and trailing "2" boundary
+                    # tokens; strip them so only AA-position embeddings are kept.
+                    seq_embeddings = layer_output[seq_idx, 1 : seq_len - 1, :]
                     all_embeddings[layer].append(seq_embeddings)
 
         result = {}
@@ -194,13 +221,14 @@ class ProGen2(BaseEmbedder):
     def embed_single_sequence(self, sequence: str, layer: int) -> np.ndarray:
         """Extract per-residue embeddings for one protein sequence."""
         self._validate_layer(layer)
-        inputs = self.tokenize([self.preprocess_sequence(sequence)])
+        inputs = self.tokenize([sequence])
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = self.model(**inputs, output_hidden_states=True, return_dict=True)
             layer_output = outputs.hidden_states[layer][0].detach().cpu()
         seq_len = int(inputs["attention_mask"][0].sum().item())
-        return layer_output[:seq_len, :].numpy()
+        # Strip boundary tokens "1" (pos 0) and "2" (pos seq_len-1).
+        return layer_output[1 : seq_len - 1, :].numpy()
 
     def _read_fasta_sequences(self, fasta_path: Path) -> List[str]:
         """Read protein sequences from a FASTA file."""
@@ -228,6 +256,7 @@ class ProGen2(BaseEmbedder):
         """Extract flattened embeddings for all proteins in a FASTA file."""
         sequences = self._read_fasta_sequences(fasta_path)
         embeddings = self.extract_embeddings(sequences, layer, batch_size=batch_size)
+        # embeddings = embeddings.to(torch.fp16)
         if output_path:
             output_path = Path(output_path)
             if not str(output_path).endswith(".pt"):
@@ -305,8 +334,16 @@ class ProGen2(BaseEmbedder):
         return self.max_length
 
     def tokenize(self, sequences: List[str]) -> Dict[str, torch.Tensor]:
-        """Tokenize protein sequences for ProGen2 input."""
-        processed = [self.preprocess_sequence(seq) for seq in sequences]
+        """Tokenize protein sequences for ProGen2 input.
+
+        ProGen2 was trained on sequences bracketed by boundary tokens:
+          forward:  1<AA_seq>2
+          reverse:  2<rev_AA_seq>1
+        We always use the forward format here so the model sees the same
+        context it was trained on.  The boundary tokens are stripped from
+        the returned embeddings in the extraction methods.
+        """
+        processed = ["1" + self.preprocess_sequence(seq) + "2" for seq in sequences]
         return self.tokenizer(
             processed,
             return_tensors="pt",

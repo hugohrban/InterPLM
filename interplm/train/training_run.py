@@ -55,7 +55,7 @@ class SAETrainingRun:
         # Initialize training state
         self.training_state = {
             "n_tokens_total": 0,
-            "current_step": 0,
+            "current_step": 1,
             "current_epoch": 0,
             "steps_in_epoch": len(self.data),
             "total_epochs": max(
@@ -87,6 +87,7 @@ class SAETrainingRun:
                 if is_last_epoch and self.training_state["last_epoch_steps"] > 0
                 else self.training_state["steps_in_epoch"]
             )
+            steps_this_epoch = min(steps_this_epoch, self.trainer.config.steps - current_step)
 
             if steps_this_epoch == 0:
                 break
@@ -106,10 +107,19 @@ class SAETrainingRun:
                 if self._should_stop(step):
                     break
 
-                # Run evaluation independently (even if wandb is disabled)
+                # Track 1: eval embeddings (reconstruction/sparsity on held-out embeddings)
+                eval_metrics = {}
                 if self.evaluation_manager._should_run_evals_on_valid(step):
+                    print(f"\nRunning eval metrics at step {step}...")
                     eval_metrics = self.get_eval_metrics(step)
-                    # If wandb is enabled, these will be logged below
+
+                # Track 2: fidelity (nnsight intervention through LM)
+                fidelity_metrics = {}
+                if self.evaluation_manager._should_run_fidelity(step):
+                    print(f"\nRunning fidelity at step {step}...")
+                    fidelity_result = self.evaluation_manager._calculate_fidelity(self.trainer.ae)
+                    if fidelity_result is not None:
+                        fidelity_metrics = {f"fidelity/{k}": v for k, v in fidelity_result.items()}
 
                 # Logging metrics (every log_steps)
                 if self.wandb_manager._should_log(step):
@@ -126,19 +136,10 @@ class SAETrainingRun:
                     }
                     information_to_log.update(progress_metrics)
 
-                    # Add dead feature counts with namespace
-                    if hasattr(self.trainer, 'steps_since_active'):
-                        information_to_log["features/dead_100_steps"] = (
-                            self.trainer.steps_since_active > 100
-                        ).sum().item()
-
-                        information_to_log["features/dead_1000_steps"] = (
-                            self.trainer.steps_since_active > 1000
-                        ).sum().item()
-
-                    # Add eval metrics if they were calculated
-                    if self.evaluation_manager._should_run_evals_on_valid(step):
+                    if eval_metrics:
                         information_to_log.update(eval_metrics)
+                    if fidelity_metrics:
+                        information_to_log.update(fidelity_metrics)
 
                     # Log metrics to wandb
                     self.wandb_manager.log_metrics(information_to_log, step)
@@ -374,8 +375,8 @@ class SAETrainingRun:
         print()
 
         try:
-            # Run fidelity evaluation one last time
-            final_fidelity = self.evaluation_manager._calculate_fidelity(self.trainer.ae)
+            # Run fidelity evaluation one last time on full dataset
+            final_fidelity = self.evaluation_manager._calculate_fidelity(self.trainer.ae, use_all_batches=False)
 
             # Save results to YAML file in model directory
             results_file = self.checkpoint_manager.save_dir / "final_evaluation.yaml"
