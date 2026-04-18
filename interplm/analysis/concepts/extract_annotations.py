@@ -153,6 +153,20 @@ def preprocess_proteins(
     return df
 
 
+def subsample_proteins(
+    df: pd.DataFrame,
+    n: int,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Select a random subset of proteins."""
+    if n >= len(df):
+        logger.warning(
+            f"Requested {n} proteins but only {len(df)} available; returning all."
+        )
+        return df
+    return df.sample(n=n, random_state=random_state).reset_index(drop=True)
+
+
 def enumerate_protein_subcategories(
     df: pd.DataFrame,
     min_required_instances: int = 100,
@@ -258,6 +272,7 @@ def main(
     n_shards: int = 5,
     min_required_instances: int = 100,
     min_protein_length: int = 1022,
+    n_proteins: int = None,  # None means use all proteins
     overwrite: bool = False,
     max_workers: int = None,  # None means use all available CPU cores
 ):
@@ -278,18 +293,23 @@ def main(
 
     # Preprocess data
     df = pd.read_csv(input_uniprot_path, sep="\t")
+    print(f"{df.shape=}")
     df = preprocess_proteins(df, min_protein_length)
+    print(f"{df.shape=}")
+    if n_proteins is not None:
+        df = subsample_proteins(df, n_proteins)
+        print(f"After subsampling: {df.shape=}")
+    print(f"{df.head()=}")
     shard_protein_data(df, output_dir, n_shards, overwrite=overwrite)
 
     # Dynamically determine which sub-categories are abundant enough to include
     categorical_options = enumerate_protein_subcategories(df, min_required_instances)
+    print(f"{categorical_concepts=}")
 
-    # Process shards in parallel using ProcessPoolExecutor
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_shard = {
-            executor.submit(
-                convert_shard_to_amino_acid_features,
+    # Process shards sequentially
+    for shard in range(n_shards):
+        try:
+            convert_shard_to_amino_acid_features(
                 shard_id=shard,
                 input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
                 output_dir=output_dir,
@@ -297,18 +317,12 @@ def main(
                 binary_cols=binary_meta_cols,
                 interaction_cols=paired_binary_cols,
                 overwrite=overwrite,
-            ): shard
-            for shard in range(n_shards)
-        }
+            )
+            logger.info(f"Successfully completed processing shard {shard}")
+        except Exception as e:
+            logger.error(f"Shard {shard} generated an exception: {e}")
 
-        # Process results as they complete
-        for future in as_completed(future_to_shard):
-            shard = future_to_shard[future]
-            try:
-                future.result()  # This will raise any exceptions that occurred
-                logger.info(f"Successfully completed processing shard {shard}")
-            except Exception as e:
-                logger.error(f"Shard {shard} generated an exception: {e}")
+
 
     logger.info("UniProt data processing complete!")
 
