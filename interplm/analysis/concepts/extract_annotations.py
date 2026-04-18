@@ -307,9 +307,26 @@ def main(
     print(f"{categorical_concepts=}")
 
     # Process shards sequentially
-    for shard in range(n_shards):
-        try:
-            convert_shard_to_amino_acid_features(
+    # for shard in range(n_shards):
+    #     try:
+    #         convert_shard_to_amino_acid_features(
+    #             shard_id=shard,
+    #             input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
+    #             output_dir=output_dir,
+    #             categorical_options=categorical_options,
+    #             binary_cols=binary_meta_cols,
+    #             interaction_cols=paired_binary_cols,
+    #             overwrite=overwrite,
+    #         )
+    #         logger.info(f"Successfully completed processing shard {shard}")
+    #     except Exception as e:
+    #         logger.error(f"Shard {shard} generated an exception: {e}")
+
+    # Process shards in parallel
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                convert_shard_to_amino_acid_features,
                 shard_id=shard,
                 input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
                 output_dir=output_dir,
@@ -318,11 +335,13 @@ def main(
                 interaction_cols=paired_binary_cols,
                 overwrite=overwrite,
             )
-            logger.info(f"Successfully completed processing shard {shard}")
-        except Exception as e:
-            logger.error(f"Shard {shard} generated an exception: {e}")
-
-
+            for shard in range(n_shards)
+        ]
+        for future in futures:
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Shard processing generated an exception: {e}")
 
     logger.info("UniProt data processing complete!")
 

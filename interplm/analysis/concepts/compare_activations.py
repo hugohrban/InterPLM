@@ -84,56 +84,40 @@ def calc_metrics_sparse(
         - fp: False positives array (concepts x features x thresholds)
         - tp_per_domain: True positives per domain array (concepts x features x thresholds)
     """
-    # Get dimensions from input matrices
     _, n_features = sae_feats_sparse.shape
     n_concepts = per_token_labels_sparse.shape[1]
     n_thresholds = len(threshold_percents)
-    per_feat_adjusted_thresholds = threshold_percents
 
-    # Initialize arrays to store results
     tp = np.zeros((n_concepts, n_features, n_thresholds))
     fp = np.zeros((n_concepts, n_features, n_thresholds))
     tp_per_domain = np.zeros((n_concepts, n_features, n_thresholds))
 
-    # Convert matrices to appropriate sparse formats for efficient operations
-    sae_feats_sparse = sae_feats_sparse.tocsr()
-    per_token_labels_sparse = per_token_labels_sparse.tocsc()
+    sae_feats_csr = sae_feats_sparse.tocsr()
+    labels_csc = per_token_labels_sparse.tocsc()
+    # Binary label matrix for vectorised tp/fp: (n_tokens, n_concepts)
+    labels_binary = (per_token_labels_sparse > 0).astype(np.float32)
+    non_aa_indices = [i for i, v in enumerate(is_aa_level_concept_list) if not v]
 
-    # Iterate through each threshold
-    for threshold_idx in range(n_thresholds):
-        threshold = per_feat_adjusted_thresholds[threshold_idx]
+    for threshold_idx, threshold in enumerate(threshold_percents):
+        feats_bin = sae_feats_csr.copy()
+        feats_bin.data = (feats_bin.data > threshold).astype(np.float32)
+        feats_bin.eliminate_zeros()
 
-        # Binarize features based on threshold
-        sae_feats_binarized = sae_feats_sparse.copy()
-        sae_feats_binarized.data = (sae_feats_binarized.data > threshold).astype(int)
-        sae_feats_binarized.eliminate_zeros()
+        # Single matmul replaces the per-concept loop for tp and fp.
+        # labels_binary.T: (n_concepts, n_tokens) @ feats_bin: (n_tokens, n_features)
+        # → (n_concepts, n_features)
+        tp_mat = (labels_binary.T @ feats_bin).toarray()
+        tp[:, :, threshold_idx] = tp_mat
 
-        # Calculate metrics for each concept
-        for concept_idx in range(n_concepts):
-            concept_labels = per_token_labels_sparse[:, concept_idx]
+        # fp = tokens where feature fires but concept is absent
+        total_active = np.asarray(feats_bin.sum(axis=0))  # (1, n_features)
+        fp[:, :, threshold_idx] = total_active - tp_mat
 
-            # Calculate true positives
-            tp_sparse = sae_feats_binarized.multiply(concept_labels > 0)
-            tp[concept_idx, :, threshold_idx] = np.asarray(
-                tp_sparse.sum(axis=0)
-            ).ravel()
-
-            # Calculate false positives
-            fp_sparse = (
-                sae_feats_binarized.multiply(concept_labels != 0).multiply(-1)
-                + sae_feats_binarized
+        # tp_per_domain only needed for non-AA-level concepts
+        for concept_idx in non_aa_indices:
+            tp_per_domain[concept_idx, :, threshold_idx] = (
+                count_unique_nonzero_sparse(feats_bin.multiply(labels_csc[:, concept_idx]))
             )
-            fp[concept_idx, :, threshold_idx] = np.asarray(
-                fp_sparse.sum(axis=0)
-            ).ravel()
-
-            # Calculate domain-specific metrics for non-AA-level concepts
-            if not is_aa_level_concept_list[concept_idx]:
-                tp_per_domain[concept_idx, :, threshold_idx] = (
-                    count_unique_nonzero_sparse(
-                        sae_feats_binarized.multiply(concept_labels)
-                    )
-                )
 
     return tp, fp, tp_per_domain
 
@@ -180,9 +164,8 @@ def calc_metrics_dense(
     Returns:
         Tuple of numpy arrays (tp, fp, tp_per_domain) containing metrics
     """
-    # Set up GPU if available, otherwise use CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Convert labels to dense tensor and move to appropriate device
+    sae_feats = sae_feats.to(device)
     per_token_labels = torch.tensor(
         per_token_labels_sparse.astype(np.float32), device=device
     )
@@ -192,43 +175,37 @@ def calc_metrics_dense(
     n_concepts = per_token_labels.shape[1]
     n_thresholds = len(threshold_percents)
 
-    # Convert thresholds to tensor and move to device
     per_feat_adjusted_thresholds = torch.tensor(
         threshold_percents, dtype=torch.float32, device=device
     )
 
-    # Initialize result tensors on device
     tp = torch.zeros((n_concepts, n_features, n_thresholds), device=device)
     fp = torch.zeros((n_concepts, n_features, n_thresholds), device=device)
     tp_per_domain = torch.zeros((n_concepts, n_features, n_thresholds), device=device)
 
-    # Calculate metrics for each threshold
+    labels_binary = (per_token_labels > 0).float()  # (n_tokens, n_concepts)
+    non_aa_indices = [i for i, v in enumerate(is_aa_level_concept) if not v]
+
     for threshold_idx in range(n_thresholds):
         threshold = per_feat_adjusted_thresholds[threshold_idx]
-
-        # Binarize features based on threshold
         sae_feats_binarized = (sae_feats > threshold).float()
 
-        # Calculate metrics for each concept
-        for concept_idx in range(n_concepts):
+        # Single matmul replaces the per-concept loop for tp and fp.
+        # labels_binary.T: (n_concepts, n_tokens) @ sae_feats_binarized: (n_tokens, n_features)
+        # → (n_concepts, n_features)
+        tp_mat = labels_binary.T @ sae_feats_binarized
+        tp[:, :, threshold_idx] = tp_mat
+
+        total_active = sae_feats_binarized.sum(dim=0, keepdim=True)  # (1, n_features)
+        fp[:, :, threshold_idx] = total_active - tp_mat
+
+        for concept_idx in non_aa_indices:
             concept_labels = per_token_labels[:, concept_idx].unsqueeze(1)
+            tp_per_domain[concept_idx, :, threshold_idx] = torch.tensor(
+                count_unique_nonzero_dense(sae_feats_binarized * concept_labels),
+                device=device,
+            )
 
-            # Calculate true positives and false positives
-            tp[concept_idx, :, threshold_idx] = (
-                sae_feats_binarized * (concept_labels > 0)
-            ).sum(dim=0)
-            fp[concept_idx, :, threshold_idx] = (
-                sae_feats_binarized * (concept_labels != 0) * (-1) + sae_feats_binarized
-            ).sum(dim=0)
-
-            # Calculate domain-specific metrics for non-AA-level concepts
-            if not is_aa_level_concept[concept_idx]:
-                tp_per_domain[concept_idx, :, threshold_idx] = torch.tensor(
-                    count_unique_nonzero_dense(sae_feats_binarized * concept_labels),
-                    device=device,
-                )
-
-    # Convert results back to numpy arrays on CPU
     return tp.cpu().numpy(), fp.cpu().numpy(), tp_per_domain.cpu().numpy()
 
 
@@ -239,82 +216,116 @@ def process_shard(
     per_token_labels: Union[np.ndarray, sparse.spmatrix],
     threshold_percents: List[float],
     is_aa_concept_list: List[bool],
+    token_chunk_size: int = 4096,
+    # kept for API compatibility, no longer used
     feat_chunk_max: int = 512,
     is_sparse: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Process a shard of data by splitting it into manageable chunks for feature calculation.
+    Process a shard by iterating over token batches rather than feature chunks.
+
+    Each token batch runs the SAE once (all features) and immediately accumulates
+    tp/fp via GPU dense matmul — eliminating the previous 40× redundant SAE passes
+    and CPU sparse conversions.
 
     Args:
         sae: Normalized SAE model
-        device: PyTorch device to use for computation
-        aa_embeddings: Amino acid embeddings tensor
-        per_token_labels: Label matrix
-        threshold_percents: List of threshold values to evaluate
-        is_aa_concept_list: Boolean flags indicating if each concept is AA-level
-        feat_chunk_max: Maximum chunk size for feature processing
-        is_sparse: Whether to use sparse matrix operations
+        device: PyTorch device
+        aa_embeddings: Amino acid embeddings (n_tokens, d_model)
+        per_token_labels: Label matrix (n_tokens, n_concepts)
+        threshold_percents: Activation thresholds to evaluate
+        is_aa_concept_list: True for AA-level concepts (no domain counting needed)
+        token_chunk_size: Tokens processed per iteration (tune to GPU memory)
+        feat_chunk_max: Unused, kept for backward compatibility
+        is_sparse: Unused, kept for backward compatibility
 
     Returns:
-        Tuple of arrays (tp, fp, tp_per_domain) containing calculated metrics
+        Tuple of (tp, fp, tp_per_domain), each (n_concepts, n_features, n_thresholds)
     """
-    # Extract embeddings tensor if it's in dict format
-    if isinstance(aa_embeddings, dict) and 'embeddings' in aa_embeddings:
-        aa_acts = aa_embeddings['embeddings']
-    else:
-        aa_acts = aa_embeddings
+    if isinstance(aa_embeddings, dict) and "embeddings" in aa_embeddings:
+        aa_embeddings = aa_embeddings["embeddings"]
 
-    # Calculate chunking parameters
-    feature_chunk_size = min(feat_chunk_max, sae.dict_size)
-    total_features = sae.dict_size
-    num_chunks = int(np.ceil(total_features / feature_chunk_size))
-    print(f"Calculating over {total_features} features in {num_chunks} chunks")
+    aa_embeddings = aa_embeddings.to(device)
 
-    # Initialize result arrays
+    n_tokens = aa_embeddings.shape[0]
+    n_features = sae.dict_size
     n_concepts = per_token_labels.shape[1]
     n_thresholds = len(threshold_percents)
-    n_features = sae.dict_size
-    tp = np.zeros((n_concepts, n_features, n_thresholds))
-    fp = np.zeros((n_concepts, n_features, n_thresholds))
-    tp_per_domain = np.zeros((n_concepts, n_features, n_thresholds))
 
-    # Convert labels to appropriate format
-    per_token_labels = (
-        sparse.csr_matrix(per_token_labels) if is_sparse else per_token_labels.toarray()
-    )
+    print(f"{n_tokens=} tokens, {n_features=} features, {n_concepts=} concepts")
 
-    # Process each chunk of features
-    for feature_list in tqdm(np.array_split(range(total_features), num_chunks)):
-        # Get SAE features for current chunk
-        sae_feats = get_sae_feats_in_batches(
-            sae=sae,
-            device=device,
-            aa_embds=aa_acts,
-            chunk_size=1024,
-            feat_list=feature_list,
+    # Labels on GPU as dense float — (n_tokens, n_concepts)
+    if sparse.issparse(per_token_labels):
+        labels_gpu = torch.tensor(
+            per_token_labels.toarray(), dtype=torch.float32, device=device
         )
+    else:
+        labels_gpu = torch.tensor(
+            per_token_labels.astype(np.float32), device=device
+        )
+    labels_binary = (labels_gpu > 0).float()  # (n_tokens, n_concepts)
 
-        # Calculate metrics using either sparse or dense implementation
-        if is_sparse:
-            sae_feats_sparse = sparse.csr_matrix(sae_feats.cpu().numpy())
-            metrics = calc_metrics_sparse(
-                sae_feats_sparse,
-                per_token_labels,
-                threshold_percents,
-                is_aa_concept_list,
+    thresholds = torch.tensor(threshold_percents, dtype=torch.float32, device=device)
+
+    # Accumulators on GPU
+    tp = torch.zeros((n_concepts, n_features, n_thresholds), device=device)
+    total_active = torch.zeros((n_features, n_thresholds), device=device)
+
+    # For tp_per_domain: per non-AA concept, track which domain IDs each feature catches.
+    # caught_ever[c][t_idx][d, f] = True if feature f fired on any token in domain d.
+    non_aa_indices = [i for i, v in enumerate(is_aa_concept_list) if not v]
+    domain_info: dict = {}  # concept_idx → (unique_domains, caught_ever)
+    for c_idx in non_aa_indices:
+        labels_col = labels_gpu[:, c_idx]
+        unique_domains = torch.unique(labels_col[labels_col > 0])
+        if len(unique_domains) > 0:
+            caught_ever = torch.zeros(
+                (n_thresholds, len(unique_domains), n_features),
+                dtype=torch.bool,
+                device=device,
             )
-        else:
-            metrics = calc_metrics_dense(
-                sae_feats, per_token_labels, threshold_percents, is_aa_concept_list
-            )
+            domain_info[c_idx] = (unique_domains, caught_ever)
 
-        # Update results arrays with computed metrics
-        tp_subset, fp_subset, tp_per_domain_subset = metrics
-        tp[:, feature_list] = tp_subset
-        fp[:, feature_list] = fp_subset
-        tp_per_domain[:, feature_list] = tp_per_domain_subset
+    all_features = list(range(n_features))
 
-    return (tp, fp, tp_per_domain)
+    with torch.no_grad():
+        for start in tqdm(range(0, n_tokens, token_chunk_size), desc="Token chunks"):
+            end = min(start + token_chunk_size, n_tokens)
+            aa_chunk = aa_embeddings[start:end]  # (chunk, d_model)
+
+            # One SAE pass for all features — replaces the 40-chunk feature loop
+            sae_feats = sae.encode_feat_subset(aa_chunk, all_features)  # (chunk, n_features)
+
+            labels_bin_chunk = labels_binary[start:end]  # (chunk, n_concepts)
+            labels_chunk = labels_gpu[start:end]          # (chunk, n_concepts)
+
+            for t_idx in range(n_thresholds):
+                feats_bin = (sae_feats > thresholds[t_idx]).float()  # (chunk, n_features)
+
+                # (n_concepts, chunk) @ (chunk, n_features) → (n_concepts, n_features)
+                tp[:, :, t_idx] += labels_bin_chunk.T @ feats_bin
+                total_active[:, t_idx] += feats_bin.sum(dim=0)
+
+                # tp_per_domain: for each non-AA concept, OR in which domains were caught
+                for c_idx, (unique_domains, caught_ever) in domain_info.items():
+                    labels_col_chunk = labels_chunk[:, c_idx]  # (chunk,)
+                    # (chunk, n_domains) — which tokens belong to each domain
+                    domain_mask = (
+                        labels_col_chunk.unsqueeze(1) == unique_domains.unsqueeze(0)
+                    ).float()
+                    # (n_domains, chunk) @ (chunk, n_features) → (n_domains, n_features)
+                    caught_ever[t_idx] |= (domain_mask.T @ feats_bin) > 0
+
+    # fp = total activations minus true positives
+    fp = total_active.unsqueeze(0) - tp  # (n_concepts, n_features, n_thresholds)
+
+    tp_per_domain = torch.zeros((n_concepts, n_features, n_thresholds), device=device)
+    for c_idx, (_, caught_ever) in domain_info.items():
+        # caught_ever: (n_thresholds, n_domains, n_features) → sum over domains
+        # → (n_thresholds, n_features) → transpose → (n_features, n_thresholds)
+        tp_per_domain[c_idx] = caught_ever.sum(dim=1).T
+
+    return tp.cpu().numpy(), fp.cpu().numpy(), tp_per_domain.cpu().numpy()
 
 
 def analyze_concepts(
@@ -436,7 +447,7 @@ def analyze_all_shards_in_set(
     # Load list of shards to evaluate from metadata
     with open(eval_set_dir / "metadata.json", "r") as f:
         shards_to_eval = json.load(f)["shard_source"]
-        print(f"Analyzing set {eval_set_dir.stem} with {shards_to_eval} shards")
+        print(f"Analyzing set {eval_set_dir.stem} with {len(shards_to_eval)} shards")
 
     # Process each shard sequentially
     for shard in shards_to_eval:
