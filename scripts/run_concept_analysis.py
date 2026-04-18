@@ -254,6 +254,7 @@ def run_sae(
                 f"layer {eval_cfg.get('layer_idx')}) — skipping."
             )
         return
+    print(f"[{name}] Using analysis embeddings from: {embds_dir}")
 
     valid_dir = sae_dir / "results_valid_counts"
     test_dir  = sae_dir / "results_test_counts"
