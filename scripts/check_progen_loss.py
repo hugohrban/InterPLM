@@ -328,6 +328,92 @@ def check_token_ids(model, tokenizer, sequences: List[str], device: str) -> None
 
 
 # ---------------------------------------------------------------------------
+# Section 5 — negative-control ablation: swapped terminus tokens
+# ---------------------------------------------------------------------------
+
+def check_terminus_swap_ablation(
+    model, tokenizer, sequences: List[str], device: str, max_length: int
+) -> None:
+    print("\n" + "=" * 65)
+    print("SECTION 5: Negative-control ablation — swapped terminus tokens")
+    print("=" * 65)
+    print("  If terminus tokens encode directionality, mismatched pairings")
+    print("  should yield higher CE loss than correctly matched ones.")
+    print()
+    print("  Conditions:")
+    print("    raw         : <seq>           (no terminus tokens)")
+    print("    fwd_correct : 1<seq>2         (correct forward)")
+    print("    rev_correct : 2<rev_seq>1     (correct reverse)")
+    print("    fwd_swap    : 1<rev_seq>2     (reversed seq, forward tokens  ← wrong)")
+    print("    rev_swap    : 2<seq>1         (forward seq, reverse tokens   ← wrong)")
+    print()
+
+    seqs_raw       = sequences
+    seqs_fwd       = ["1" + s + "2"        for s in sequences]
+    seqs_rev       = ["2" + s[::-1] + "1"  for s in sequences]
+    seqs_fwd_swap  = ["1" + s[::-1] + "2"  for s in sequences]  # wrong: rev seq inside fwd tokens
+    seqs_rev_swap  = ["2" + s + "1"        for s in sequences]  # wrong: fwd seq inside rev tokens
+
+    loss_raw,      mask_raw      = compute_per_token_loss(model, tokenizer, seqs_raw,      device, max_length)
+    loss_fwd,      mask_fwd      = compute_per_token_loss(model, tokenizer, seqs_fwd,      device, max_length)
+    loss_rev,      mask_rev      = compute_per_token_loss(model, tokenizer, seqs_rev,      device, max_length)
+    loss_fwd_swap, mask_fwd_swap = compute_per_token_loss(model, tokenizer, seqs_fwd_swap, device, max_length)
+    loss_rev_swap, mask_rev_swap = compute_per_token_loss(model, tokenizer, seqs_rev_swap, device, max_length)
+
+    ce_raw      = masked_mean_ce(loss_raw,      mask_raw)
+    ce_fwd      = masked_mean_ce(loss_fwd,      mask_fwd)
+    ce_rev      = masked_mean_ce(loss_rev,      mask_rev)
+    ce_fwd_swap = masked_mean_ce(loss_fwd_swap, mask_fwd_swap)
+    ce_rev_swap = masked_mean_ce(loss_rev_swap, mask_rev_swap)
+
+    # Per-sequence table
+    header = (f"  {'seq':>4}  {'raw':>8}  {'fwd✓':>8}  {'rev✓':>8}"
+              f"  {'fwd✗':>8}  {'rev✗':>8}"
+              f"  {'fwd✗-fwd✓':>10}  {'rev✗-rev✓':>10}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for i in range(len(sequences)):
+        delta_fwd = ce_fwd_swap[i].item() - ce_fwd[i].item()
+        delta_rev = ce_rev_swap[i].item() - ce_rev[i].item()
+        flag_f = "  ←" if delta_fwd > 0.05 else ""
+        flag_r = "  ←" if delta_rev > 0.05 else ""
+        print(
+            f"  {i:>4}"
+            f"  {ce_raw[i].item():>8.4f}"
+            f"  {ce_fwd[i].item():>8.4f}"
+            f"  {ce_rev[i].item():>8.4f}"
+            f"  {ce_fwd_swap[i].item():>8.4f}"
+            f"  {ce_rev_swap[i].item():>8.4f}"
+            f"  {delta_fwd:>+10.4f}{flag_f}"
+            f"  {delta_rev:>+10.4f}{flag_r}"
+        )
+
+    # Summary
+    print(f"\n  Summary across {len(sequences)} sequences (mean ± std CE):")
+    print(f"    raw          (no tokens)      : {ce_raw.mean():.4f} ± {ce_raw.std():.4f}")
+    print(f"    fwd_correct  1<seq>2          : {ce_fwd.mean():.4f} ± {ce_fwd.std():.4f}")
+    print(f"    rev_correct  2<rev_seq>1      : {ce_rev.mean():.4f} ± {ce_rev.std():.4f}")
+    print(f"    fwd_swap     1<rev_seq>2  ✗   : {ce_fwd_swap.mean():.4f} ± {ce_fwd_swap.std():.4f}"
+          f"  (delta vs fwd✓: {(ce_fwd_swap - ce_fwd).mean():+.4f})")
+    print(f"    rev_swap     2<seq>1      ✗   : {ce_rev_swap.mean():.4f} ± {ce_rev_swap.std():.4f}"
+          f"  (delta vs rev✓: {(ce_rev_swap - ce_rev).mean():+.4f})")
+
+    # Directional verdict
+    fwd_penalty = (ce_fwd_swap - ce_fwd).mean().item()
+    rev_penalty = (ce_rev_swap - ce_rev).mean().item()
+    print(f"\n  Verdict:")
+    if fwd_penalty > 0.05 and rev_penalty > 0.05:
+        print(f"    BOTH swaps increase loss (fwd: {fwd_penalty:+.4f}, rev: {rev_penalty:+.4f}).")
+        print(f"    Terminus tokens appear to encode sequence directionality.")
+    elif fwd_penalty > 0.05 or rev_penalty > 0.05:
+        print(f"    Only one swap shows a clear penalty (fwd: {fwd_penalty:+.4f}, rev: {rev_penalty:+.4f}).")
+        print(f"    Partial evidence for directional encoding.")
+    else:
+        print(f"    Neither swap shows a clear CE penalty (fwd: {fwd_penalty:+.4f}, rev: {rev_penalty:+.4f}).")
+        print(f"    Terminus tokens may not strongly encode sequence orientation.")
+
+
+# ---------------------------------------------------------------------------
 # Section 4 — embedding shift due to special tokens
 # ---------------------------------------------------------------------------
 
@@ -443,6 +529,7 @@ def main():
     check_padding_masking(model, tokenizer, sequences, device, args.max_len + 2)
     check_special_tokens(model, tokenizer, sequences, device, args.max_len + 2)
     check_token_ids(model, tokenizer, sequences, device)
+    check_terminus_swap_ablation(model, tokenizer, sequences, device, args.max_len + 2)
     check_embedding_shift(model, tokenizer, sequences, device, args.max_len + 2)
 
 
