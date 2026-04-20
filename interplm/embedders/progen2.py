@@ -194,6 +194,30 @@ class ProGen2(BaseEmbedder):
             result[layer] = layer_tensor
         return result
 
+    def extract_embeddings_with_boundaries_multiple_layers(
+        self,
+        sequences: List[str],
+        layers: List[int],
+        batch_size: int = 8,
+    ) -> Dict[str, Union[Dict[int, torch.Tensor], List[Tuple[int, int]]]]:
+        """Extract embeddings for multiple layers and track protein boundaries.
+
+        Returns:
+            Dictionary with:
+                'embeddings': Dict[int, Tensor] mapping layer → (total_tokens, d_model)
+                'boundaries': List of (start, end) tuples for each protein
+        """
+        embeddings_dict = self.extract_embeddings_multiple_layers(
+            sequences, layers, batch_size=batch_size, shuffle=False
+        )
+        boundaries = []
+        current_pos = 0
+        for sequence in sequences:
+            seq_len = len(self.preprocess_sequence(sequence))
+            boundaries.append((current_pos, current_pos + seq_len))
+            current_pos += seq_len
+        return {"embeddings": embeddings_dict, "boundaries": boundaries}
+
     def extract_embeddings_with_boundaries(
         self,
         sequences: List[str],
