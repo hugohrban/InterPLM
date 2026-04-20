@@ -10,6 +10,7 @@ from typing import Optional
 from interplm.sae.dictionary import BatchTopKSAE
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from interplm.sae.inference import (
     get_sae_feats_in_batches,
@@ -52,15 +53,16 @@ def calculate_feature_statistics(
     # binary mask of features that have been non-zero at least once
     is_feature_ever_nonzero = torch.zeros(num_features, device=device)
 
-    for i, shard_idx in enumerate(shard_indices):
-        print(f"Processing shard {shard_idx} ({i+1}/{len(shard_indices)})")
-        
+    shard_bar = tqdm(shard_indices, desc="Shards", unit="shard")
+    for shard_idx in shard_bar:
+        shard_bar.set_postfix(shard=shard_idx)
+
         # Load embeddings for current shard
         esm_acts = data_loader.load_shard(shard_idx)
 
         n_features_processed = 0
         n_features_with_max_value_of_0 = 0
-        
+
         # Process features in chunks to manage memory
         for feature_list in split_up_feature_list(
             total_features=num_features, max_feature_chunk_size=max_features_per_chunk

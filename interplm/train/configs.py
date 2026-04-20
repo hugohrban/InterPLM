@@ -134,12 +134,12 @@ class TrainingRunConfig:
     def from_yaml(cls, config_path: Union[str, Path]) -> "TrainingRunConfig":
         """Load configs from a YAML file"""
         
-        print(f"Loading configs from {config_path}")
+        # print(f"Loading configs from {config_path}")
         with open(config_path, "r") as f:
             data = yaml.unsafe_load(f)
         
-        print(f"Loaded data type: {type(data)}")
-        print(f"Data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+        # print(f"Loaded data type: {type(data)}")
+        # print(f"Data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
         
         # If data is already a TrainingRunConfig object, return it directly
         if isinstance(data, cls):
