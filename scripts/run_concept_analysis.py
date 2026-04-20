@@ -37,7 +37,7 @@ import yaml
 
 from interplm.analysis.concepts.calculate_f1 import combine_metrics_across_shards
 from interplm.analysis.concepts.compare_activations import analyze_all_shards_in_set
-from interplm.analysis.concepts.report_metrics import report_metrics
+from interplm.analysis.concepts.report_metrics import report_metrics, report_valid_metrics
 from interplm.sae.normalize import normalize_sae_features
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,9 @@ from interplm.sae.normalize import normalize_sae_features
 EMBEDDINGS_BASE_MAP: dict[str, str] = {
     "esm2_t6_8m_ur50d": "esm2_8m",   # facebook/esm2_t6_8M_UR50D or esm2_t6_8M_UR50D
     "esm2-8m":          "esm2_8m",   # shorthand used with published pretrained SAEs
+    "esm2-8M":          "esm2_8m",   # shorthand used with published pretrained SAEs
     "esm2-650m":        "esm2_650m", # published ESM-2-650M SAEs
+    "esm2-650M":        "esm2_650m", # published ESM-2-650M SAEs
     "progen2-small":    "progen2_small",
 }
 
@@ -301,6 +303,18 @@ def run_sae(
         )
         log("calculate F1 [valid]")
 
+    # Step 3b — Report valid metrics
+    valid_summary_path = valid_dir / "valid_metrics_summary.json"
+    if not force and valid_summary_path.exists():
+        log("report valid metrics", skipped=True)
+    else:
+        print(f"  [{name}] report valid metrics ...")
+        report_valid_metrics(
+            valid_path=valid_dir / "concept_f1_scores.csv",
+            eval_set_dir=valid_eval,
+        )
+        log("report valid metrics")
+
     # Step 4 — Compare activations (test)
     if not force and shards_complete(test_dir, test_eval):
         log("compare activations [test]", skipped=True)
@@ -469,11 +483,23 @@ def main() -> None:
                 model_name = args.model_name or eval_cfg.get("model_name") or ""
                 layer_idx = args.layer if args.layer is not None else eval_cfg.get("layer_idx")
                 row = {k: v for k, v in summary.items() if not isinstance(v, dict)}
+                # Merge in valid metrics if available
+                valid_summary_path = sae_dir / "results_valid_counts" / "valid_metrics_summary.json"
+                valid_row: dict = {}
+                if valid_summary_path.exists():
+                    with open(valid_summary_path) as _f:
+                        valid_summary = json.load(_f)
+                    valid_row = {
+                        f"valid_{k}": v
+                        for k, v in valid_summary.items()
+                        if not isinstance(v, dict)
+                    }
                 all_results.append({
                     "sae": sae_dir.name,
                     "model_name": model_name,
                     "layer": layer_idx,
                     **row,
+                    **valid_row,
                 })
         except Exception:
             print(f"\n  [{sae_dir.name}] ERROR:")

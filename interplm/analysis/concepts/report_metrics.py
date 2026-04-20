@@ -370,6 +370,92 @@ def _compute_rank_stability(
     }
 
 
+def report_valid_metrics(
+    valid_path: Path,
+    eval_set_dir: Optional[Path] = None,
+    top_threshold: float = 0.5,
+) -> dict:
+    """
+    Report in-sample best F1 per concept on the validation set.
+
+    Unlike report_metrics (which selects features on valid and evaluates on test),
+    this is self-contained: the best feature per concept is selected and reported
+    from the same validation split. Use this to understand validation-set performance
+    without needing the test set.
+
+    Returns:
+        Dict with summary statistics, written to valid_metrics_summary.json
+    """
+    df_valid = pd.read_csv(valid_path)
+
+    summary_path = valid_path.parent / "valid_metrics_summary.json"
+
+    # Best feature per concept: self-selected from valid
+    top_feat_per_concept = (
+        df_valid[
+            ~df_valid["concept"].str.contains(
+                "|".join(concept_types_to_ignore), case=False, na=False
+            )
+        ]
+        .sort_values(["f1_per_domain", "f1"], ascending=False)
+        .drop_duplicates("concept")
+    )
+
+    all_top_feats = identify_all_top_pairings(df_valid, top_threshold)
+
+    avg_f1 = float(top_feat_per_concept["f1_per_domain"].mean())
+    n_concepts = int(all_top_feats["concept"].nunique())
+    n_features = int(all_top_feats["feature"].nunique())
+
+    f1_dist = _compute_f1_distribution(top_feat_per_concept["f1_per_domain"])
+    polysemanticity = _compute_polysemanticity(all_top_feats)
+
+    n_total_concepts, coverage, per_type_coverage = (
+        _compute_concept_coverage(all_top_feats, eval_set_dir)
+        if eval_set_dir is not None
+        else (None, None, None)
+    )
+
+    summary: dict = {
+        "avg_f1_per_concept": round(avg_f1, 6),
+        **f1_dist,
+        "n_concepts_identified": n_concepts,
+        "n_features_with_concept": n_features,
+        **polysemanticity,
+        "top_threshold": top_threshold,
+    }
+    if n_total_concepts is not None:
+        summary["n_total_concepts"] = n_total_concepts
+        summary["concept_coverage"] = coverage
+        summary["per_type_coverage"] = per_type_coverage
+
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    print(f"Saved valid summary metrics to {summary_path}")
+    print("-" * 50)
+    print(f"[Valid] Average best F1 per concept: {avg_f1:.3f}")
+    print(f"  median={f1_dist.get('median_f1_per_concept', '?'):.3f}  "
+          f"p90={f1_dist.get('p90_f1_per_concept', '?'):.3f}  "
+          f">0.7: {f1_dist.get('frac_f1_above_0.7', '?'):.1%}  "
+          f">0.9: {f1_dist.get('frac_f1_above_0.9', '?'):.1%}")
+    print(f"[Valid] Number of concepts identified: {n_concepts}", end="")
+    if coverage is not None:
+        print(f"  ({coverage:.1%} of {n_total_concepts} total)")
+    else:
+        print()
+    print(f"[Valid] Number of features associated with a concept: {n_features}")
+    if per_type_coverage:
+        print("Per-type coverage:")
+        for t, stats in per_type_coverage.items():
+            print(f"  {t:<30} {stats['identified']:>4}/{stats['total']:<4} ({stats['fraction']:.1%})")
+    print(f"[Valid] Polysemanticity: mean {polysemanticity['mean_concepts_per_feature']:.2f} concepts/feature  "
+          f"within-type {polysemanticity['frac_features_within_type_polysemantic']:.1%}  "
+          f"cross-type only {polysemanticity['frac_features_cross_type_only']:.1%}")
+
+    return summary
+
+
 def report_metrics(
     valid_path: Path,
     test_path: Path,
