@@ -86,6 +86,7 @@ def process_categorical_feature(
     category_options: Set[str],
     seq_len: int,
     current_index: Dict[str, int],
+    separator_name: str = "note",
 ) -> tuple[list, dict]:
     """
     Process categorical features (i.e. Domain has multiple sub-categories) from UniProt annotations.
@@ -96,6 +97,8 @@ def process_categorical_feature(
         category_options: Set of valid category names
         seq_len: Length of the protein sequence
         current_index: Dictionary tracking current index for each category
+        separator_name: Field name used to store the subcategory label in the raw annotation
+            (e.g. "note" for most types, "ligand" for Binding site)
 
     Returns:
         Tuple of (list of category indices vectors, updated current_index)
@@ -111,7 +114,7 @@ def process_categorical_feature(
     entries = column_data.split(f"{column_name} ")[1:]
     for entry in entries:
         positions_in_entry = entry.split(";")[0]
-        entry_category = re.search(r'/note="([^"]+)"', entry)
+        entry_category = re.search(rf'/{separator_name}="([^"]+)"', entry)
         if entry_category:
             entry_category = entry_category.group(1).split(";")[0]
 

@@ -58,10 +58,19 @@ def expand_features(
     categorical_column_options: Dict[str, List[str]],
     binary_cols: List[str],
     interaction_cols: List[str],
+    categorical_separators: Dict[str, str] | None = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
     Expand all protein features to amino acid level.
+
+    Args:
+        categorical_separators: Maps col_name → field name used to store the subcategory
+            label in the raw UniProtKB annotation (e.g. "note" for most types, "ligand"
+            for Binding site). Defaults to "note" for any col not in the dict.
     """
+    if categorical_separators is None:
+        categorical_separators = {}
+
     new_columns = defaultdict(list)
 
     # Process categorical features
@@ -69,6 +78,8 @@ def expand_features(
         # Initialize current index for each category
         current_index = {cat: 1 for cat in category_options}
         logger.info(f"Processing categorical column: {col}")
+
+        separator_name = categorical_separators.get(col, "note")
 
         # Handle case where this shard has no data for this column
         if df[col].isnull().all():
@@ -87,7 +98,8 @@ def expand_features(
             # concept appears multiple times, we can distinguish the various instances / domains.
             for _, row in df.iterrows():
                 results, current_index = process_categorical_feature(
-                    row[col], col_name, category_options, row["Length"], current_index
+                    row[col], col_name, category_options, row["Length"], current_index,
+                    separator_name=separator_name,
                 )
                 for category_option, result in zip(category_options, results):
                     new_columns[f"{col}_{category_option}"].append(result)
@@ -211,6 +223,7 @@ def convert_shard_to_amino_acid_features(
     categorical_options: Dict[str, List[str]],
     binary_cols: List[str],
     interaction_cols: List[str],
+    categorical_separators: Dict[str, str] | None = None,
     overwrite: bool = False,
 ):
     """
@@ -236,6 +249,7 @@ def convert_shard_to_amino_acid_features(
         categorical_column_options=categorical_options,
         binary_cols=binary_cols,
         interaction_cols=interaction_cols,
+        categorical_separators=categorical_separators,
     )
 
     # Explode to amino acid level
@@ -306,6 +320,10 @@ def main(
     categorical_options = enumerate_protein_subcategories(df, min_required_instances)
     print(f"{categorical_concepts=}")
 
+    # Build separator map: col_name → field name used in raw UniProtKB annotation
+    # Most types use /note="...", but e.g. Binding site uses /ligand="..."
+    categorical_separators = {c[0]: c[2] for c in categorical_concepts}
+
     # Process shards sequentially
     # for shard in range(n_shards):
     #     try:
@@ -316,6 +334,7 @@ def main(
     #             categorical_options=categorical_options,
     #             binary_cols=binary_meta_cols,
     #             interaction_cols=paired_binary_cols,
+    #             categorical_separators=categorical_separators,
     #             overwrite=overwrite,
     #         )
     #         logger.info(f"Successfully completed processing shard {shard}")
@@ -333,6 +352,7 @@ def main(
                 categorical_options=categorical_options,
                 binary_cols=binary_meta_cols,
                 interaction_cols=paired_binary_cols,
+                categorical_separators=categorical_separators,
                 overwrite=overwrite,
             )
             for shard in range(n_shards)
