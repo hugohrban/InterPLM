@@ -20,6 +20,7 @@ def make_eval_subset(
     min_domains_per_concept: int = 25,
     valid_name: str = "valid",
     test_name: str = "test",
+    force_include_patterns: Optional[List[str]] = None,
 ):
     """
     Create a subset of the UniprotKB amino acid concept data for evaluation.
@@ -103,9 +104,24 @@ def make_eval_subset(
         all_concept_names.index(c) for c in subconcepts_to_exclude_from_evals
     ]
 
+    # Force-include any concepts whose names start with given patterns (e.g. "Binding site"),
+    # regardless of AA/domain count threshold.
+    force_include_indices: set = set()
+    if isinstance(force_include_patterns, str):
+        force_include_patterns = force_include_indices.split(",")
+    if force_include_patterns:
+        force_include_indices = {
+            i for i, name in enumerate(all_concept_names)
+            if any(name.startswith(p) for p in force_include_patterns)
+        }
+        print(
+            f"Force-including {len(force_include_indices)} concepts matching patterns: "
+            f"{force_include_patterns}"
+        )
+
     # Combine the indices of concepts with many domains and amino acids, then remove the indices of concepts to ignore
     concept_idx_to_keep = (
-        set(indices_of_many_domains) | set(indices_of_many_aa)
+        set(indices_of_many_domains) | set(indices_of_many_aa) | force_include_indices
     ) - set(indices_of_concepts_to_ignore)
     concept_idx_to_keep = sorted([int(i) for i in concept_idx_to_keep])
 
