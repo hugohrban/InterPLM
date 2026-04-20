@@ -16,7 +16,7 @@ from tqdm import tqdm
 from interplm.analysis.concepts.compare_activations import (
     load_concept_names,
 )
-from interplm.analysis.concepts.concept_constants import is_aa_level_concept
+from interplm.analysis.concepts.concept_constants import is_aa_level_concept, default_thresholds_percent
 
 
 def load_metadata(eval_set_dir: Path) -> Dict[str, Any]:
@@ -118,7 +118,7 @@ def calculate_f1(precision: float, recall: float) -> float:
 def combine_metrics_across_shards(
     eval_res_dir: Path,
     eval_set_dir: Path,
-    threshold_percents: List[float] = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    threshold_percents: List[float] = default_thresholds_percent,
     custom_output_path: Optional[Path] = None,
 ) -> None:
     """

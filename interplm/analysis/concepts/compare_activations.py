@@ -12,7 +12,6 @@ on neurons disguising as SAE features via identity SAEs is quite slow. To addres
 use a dense implementation for the neuron activations that can be set via the is_sparse flag.
 """
 
-from email.policy import default
 import json
 from pathlib import Path
 from typing import List, Tuple, Union
