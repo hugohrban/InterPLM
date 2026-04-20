@@ -13,14 +13,16 @@ from tqdm import tqdm
 from interplm.embedders import get_embedder
 
 
-def _get_output_file(shard_file: Path, output_dir: Path) -> Path:
-    if "shard_" in str(shard_file.parent.name):
-        return output_dir / shard_file.parent.name / "embeddings.pt"
-    return output_dir / f"{shard_file.stem}.pt"
+def _output_file(shard_file: Path, output_dir: Path, layer: int, multi_layer: bool) -> Path:
+    shard_name = shard_file.parent.name if "shard_" in shard_file.parent.name else shard_file.stem
+    if multi_layer:
+        return output_dir / f"layer_{layer}" / shard_name / "embeddings.pt"
+    return output_dir / shard_name / "embeddings.pt"
 
 
-def is_shard_done(shard_file: Path, output_dir: Path) -> bool:
-    return _get_output_file(shard_file, output_dir).exists()
+def is_shard_done(shard_file: Path, output_dir: Path, layers: List[int]) -> bool:
+    multi = len(layers) > 1
+    return all(_output_file(shard_file, output_dir, layer, multi).exists() for layer in layers)
 
 
 def _load_shard(shard_file: Path, sequence_column: str) -> tuple[list, list]:
@@ -47,26 +49,36 @@ def _load_shard(shard_file: Path, sequence_column: str) -> tuple[list, list]:
     return sequences, protein_ids
 
 
-def _embed_and_save(embedder, shard_file: Path, output_dir: Path, layer: int, batch_size: int, sequence_column: str) -> None:
+def _embed_and_save(
+    embedder,
+    shard_file: Path,
+    output_dir: Path,
+    layers: List[int],
+    batch_size: int,
+    sequence_column: str,
+) -> None:
     sequences, protein_ids = _load_shard(shard_file, sequence_column)
-    print(f"\nProcessing {shard_file.name} with {len(sequences)} sequences")
+    print(f"\nProcessing {shard_file.name} with {len(sequences)} sequences, layers={layers}")
 
-    embeddings_dict = embedder.extract_embeddings_with_boundaries(
-        sequences, layer=layer, batch_size=batch_size
+    multi = len(layers) > 1
+    result = embedder.extract_embeddings_with_boundaries_multiple_layers(
+        sequences, layers=layers, batch_size=batch_size
     )
+    boundaries = result["boundaries"]
+    embeddings_by_layer: dict = result["embeddings"]  # Dict[int, Tensor]
 
-    output_file = _get_output_file(shard_file, output_dir)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    torch.save(
-        {
-            "embeddings": embeddings_dict["embeddings"],
-            "boundaries": embeddings_dict["boundaries"],
-            "protein_ids": protein_ids,
-        },
-        output_file,
-    )
-    print(f"Saved embeddings to {output_file}")
+    for layer, embeddings in embeddings_by_layer.items():
+        output_file = _output_file(shard_file, output_dir, layer, multi)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "embeddings": embeddings,
+                "boundaries": boundaries,
+                "protein_ids": protein_ids,
+            },
+            output_file,
+        )
+        print(f"Saved layer {layer} embeddings to {output_file}")
 
 
 # Module-level state for worker processes (one embedder per process, loaded once)
@@ -85,14 +97,14 @@ def _init_worker(embedder_type: str, model_name: str, gpu_queue) -> None:
 def _worker(
     shard_file: Path,
     output_dir: Path,
-    layer: int,
+    layers: List[int],
     batch_size: int,
     sequence_column: str,
 ) -> str:
     current_batch_size = batch_size
     while True:
         try:
-            _embed_and_save(_worker_embedder, shard_file, output_dir, layer, current_batch_size, sequence_column)
+            _embed_and_save(_worker_embedder, shard_file, output_dir, layers, current_batch_size, sequence_column)
             print(f"[✅] {shard_file.name} with batch_size={current_batch_size} on {_worker_device}")
             return shard_file.name
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
@@ -110,7 +122,7 @@ def _process_sequential(
     output_dir: Path,
     embedder_type: str,
     model_name: str,
-    layer: int,
+    layers: List[int],
     batch_size: int,
     sequence_column: str,
     device: str,
@@ -122,7 +134,7 @@ def _process_sequential(
         current_batch_size = batch_size
         while True:
             try:
-                _embed_and_save(embedder, shard_file, output_dir, layer, current_batch_size, sequence_column)
+                _embed_and_save(embedder, shard_file, output_dir, layers, current_batch_size, sequence_column)
                 processed += 1
                 break
             except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
@@ -145,7 +157,7 @@ def embed_annotations(
     output_dir: Path,
     embedder_type: str = "esm",
     model_name: str = "facebook/esm2_t6_8M_UR50D",
-    layer: int = 3,
+    layers: List[int] = [3],
     batch_size: int = 8,
     sequence_column: str = "sequence",
 ):
@@ -157,7 +169,9 @@ def embed_annotations(
         output_dir: Directory to save embeddings
         embedder_type: Type of protein embedder to use (default: esm)
         model_name: Model name/identifier (default: facebook/esm2_t6_8M_UR50D)
-        layer: Layer to extract embeddings from (default: 3)
+        layers: Layer(s) to extract embeddings from. Single layer saves to
+                output_dir/shard_N/embeddings.pt (backward compatible).
+                Multiple layers save to output_dir/layer_N/shard_N/embeddings.pt.
         batch_size: Batch size for processing (default: 8)
         sequence_column: Name of the column containing sequences (default: sequence)
     """
@@ -173,12 +187,13 @@ def embed_annotations(
         raise FileNotFoundError(f"No protein data files found in {input_dir}")
 
     # Skip already-processed shards
-    pending = [f for f in shard_files if not is_shard_done(f, output_dir)]
+    pending = [f for f in shard_files if not is_shard_done(f, output_dir, layers)]
     skipped = len(shard_files) - len(pending)
     print(
         f"{len(shard_files)} total shards, {skipped} skipped (already done), "
         f"{len(pending)} to process"
     )
+    print(f"Extracting layers: {layers}")
 
     if not pending:
         print("All shards already processed.")
@@ -191,7 +206,7 @@ def embed_annotations(
         device = "cuda:0" if n_gpus == 1 else "cpu"
         print(f"Device: {device}")
         processed, failed = _process_sequential(
-            pending, output_dir, embedder_type, model_name, layer, batch_size, sequence_column, device
+            pending, output_dir, embedder_type, model_name, layers, batch_size, sequence_column, device
         )
     else:
         print(f"Using {n_gpus} GPUs (one model loaded per GPU, kept resident)")
@@ -208,7 +223,7 @@ def embed_annotations(
             initargs=(embedder_type, model_name, gpu_queue),
         ) as executor:
             future_to_shard = {
-                executor.submit(_worker, f, output_dir, layer, batch_size, sequence_column): f
+                executor.submit(_worker, f, output_dir, layers, batch_size, sequence_column): f
                 for f in pending
             }
             for future in tqdm(as_completed(future_to_shard), total=len(pending), desc="Shards"):
