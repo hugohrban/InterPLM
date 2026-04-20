@@ -32,6 +32,7 @@ import shutil
 import traceback
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from interplm.analysis.concepts.calculate_f1 import combine_metrics_across_shards
@@ -232,8 +233,11 @@ def run_sae(
     force: bool = False,
     model_name_override: str | None = None,
     layer_override: int | None = None,
-) -> None:
-    """Run the full concept-analysis pipeline for one SAE directory."""
+) -> dict | None:
+    """
+    Run the full concept-analysis pipeline for one SAE directory.
+    Returns the metrics summary dict (from report_metrics) or None if skipped.
+    """
     name = sae_dir.name
 
     # If config is missing and we have a known model name, copy a dummy config
@@ -253,7 +257,7 @@ def run_sae(
                 f"[{name}] Unknown model ({eval_cfg.get('model_name')!r}, "
                 f"layer {eval_cfg.get('layer_idx')}) — skipping."
             )
-        return
+        return None
     print(f"[{name}] Using analysis embeddings from: {embds_dir}")
 
     valid_dir = sae_dir / "results_valid_counts"
@@ -322,15 +326,20 @@ def run_sae(
         log("calculate F1 [test]")
 
     # Step 6 — Report metrics
-    if not force and (test_dir / "heldout_top_pairings.csv").exists():
+    summary_path = test_dir / "metrics_summary.json"
+    if not force and summary_path.exists():
         log("report metrics", skipped=True)
+        with open(summary_path) as f:
+            return json.load(f)
     else:
         print(f"  [{name}] report metrics ...")
-        report_metrics(
+        summary = report_metrics(
             valid_path=valid_dir / "concept_f1_scores.csv",
             test_path=test_dir  / "concept_f1_scores.csv",
+            eval_set_dir=test_eval,
         )
         log("report metrics")
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -438,13 +447,14 @@ def main() -> None:
     # Run analysis
     n_completed = 0
     n_errored = 0
+    all_results: list[dict] = []
 
     for sae_dir in saes:
         print(f"\n{'='*70}")
         print(f"  SAE: {sae_dir.name}")
         print(f"{'='*70}")
         try:
-            run_sae(
+            summary = run_sae(
                 sae_dir=sae_dir,
                 annotations_dir=args.annotations_dir,
                 embeddings_base_dir=args.embeddings_base_dir,
@@ -453,10 +463,38 @@ def main() -> None:
                 layer_override=args.layer,
             )
             n_completed += 1
+            if summary is not None:
+                config = load_config(sae_dir)
+                eval_cfg = (config.get("eval_cfg") or {}) if config else {}
+                model_name = args.model_name or eval_cfg.get("model_name") or ""
+                layer_idx = args.layer if args.layer is not None else eval_cfg.get("layer_idx")
+                row = {k: v for k, v in summary.items() if not isinstance(v, dict)}
+                all_results.append({
+                    "sae": sae_dir.name,
+                    "model_name": model_name,
+                    "layer": layer_idx,
+                    **row,
+                })
         except Exception:
             print(f"\n  [{sae_dir.name}] ERROR:")
             traceback.print_exc()
             n_errored += 1
+
+    # Write consolidated results table
+    if all_results:
+        results_path = args.saes_dir / "concept_analysis_results.csv"
+        # Merge with any existing rows so reruns of a subset don't wipe prior entries
+        if results_path.exists():
+            existing = pd.read_csv(results_path)
+            updated = pd.concat(
+                [existing[~existing["sae"].isin({r["sae"] for r in all_results})],
+                 pd.DataFrame(all_results)],
+                ignore_index=True,
+            ).sort_values("sae")
+        else:
+            updated = pd.DataFrame(all_results).sort_values("sae")
+        updated.to_csv(results_path, index=False)
+        print(f"\nConsolidated results saved to {results_path}")
 
     print(f"\n{'='*70}")
     print(f"  Summary: {n_completed} completed, {n_errored} errored")
