@@ -12,6 +12,7 @@ on neurons disguising as SAE features via identity SAEs is quite slow. To addres
 use a dense implementation for the neuron activations that can be set via the is_sparse flag.
 """
 
+from email.policy import default
 import json
 from pathlib import Path
 from typing import List, Tuple, Union
@@ -21,7 +22,10 @@ import torch
 from scipy import sparse
 from tqdm import tqdm
 
-from interplm.analysis.concepts.concept_constants import is_aa_level_concept
+from interplm.analysis.concepts.concept_constants import (
+    is_aa_level_concept,
+    default_thresholds_percent
+)
 from interplm.sae.dictionary import Dictionary
 from interplm.sae.inference import get_sae_feats_in_batches, load_sae
 from interplm.data_processing.embedding_loader import load_shard_embeddings
@@ -289,7 +293,8 @@ def process_shard(
     all_features = list(range(n_features))
 
     with torch.no_grad():
-        for start in tqdm(range(0, n_tokens, token_chunk_size), desc="Token chunks"):
+        for start in range(0, n_tokens, token_chunk_size):
+        # for start in tqdm(range(0, n_tokens, token_chunk_size), desc="Token chunks"):
             end = min(start + token_chunk_size, n_tokens)
             aa_chunk = aa_embeddings[start:end]  # (chunk, d_model)
 
@@ -333,7 +338,7 @@ def analyze_concepts(
     aa_embds_dir: Path = Path("../../data/processed/embeddings"),
     eval_set_dir: Path = Path("../../data/processed/valid"),
     output_dir: Path = "concept_results",
-    threshold_percents: List[float] = [0, 0.15, 0.5, 0.6, 0.8],
+    threshold_percents: List[float] = default_thresholds_percent,
     shard: int | None = None,
     is_sparse: bool = True,
 ):
@@ -424,7 +429,7 @@ def analyze_all_shards_in_set(
     aa_embds_dir: Path,
     eval_set_dir: Path,
     output_dir: Path = "concept_results",
-    threshold_percents: List[float] = [0, 0.15, 0.5, 0.6, 0.8],
+    threshold_percents: List[float] = default_thresholds_percent,
     is_sparse: bool = True,
 ):
     """Wrapper to scan calculate metrics across all shards in an evaluation set.
@@ -450,7 +455,7 @@ def analyze_all_shards_in_set(
         print(f"Analyzing set {eval_set_dir.stem} with {len(shards_to_eval)} shards")
 
     # Process each shard sequentially
-    for shard in shards_to_eval:
+    for shard in tqdm(shards_to_eval, desc="Processing shards"):
         analyze_concepts(
             sae_dir,
             aa_embds_dir,

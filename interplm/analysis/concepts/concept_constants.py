@@ -63,6 +63,11 @@ subconcepts_to_exclude_from_evals = [
 per_aa_concepts = ["Active site", "Cofactor", "Glycosylation",
                    "Modified residue", "amino_acid", "Disulfide bond"]
 
+# from original interPLM code
+default_thresholds_percent = [0, 0.15, 0.5, 0.6, 0.8]
+# more uniform (2x slower to run)
+# default_thresholds_percent = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
 
 def is_aa_level_concept(concept_name: str) -> bool:
     return any(aa_concept in concept_name for aa_concept in per_aa_concepts)

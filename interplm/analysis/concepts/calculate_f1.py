@@ -118,7 +118,7 @@ def calculate_f1(precision: float, recall: float) -> float:
 def combine_metrics_across_shards(
     eval_res_dir: Path,
     eval_set_dir: Path,
-    threshold_percents: List[float] = [0, 0.15, 0.5, 0.6, 0.8],
+    threshold_percents: List[float] = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
     custom_output_path: Optional[Path] = None,
 ) -> None:
     """
