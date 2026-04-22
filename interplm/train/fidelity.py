@@ -248,11 +248,11 @@ class ESMFidelityFunction(EvaluationManager):
         print("Finished initializing ESM Fidelity Function")
 
     def _calculate_fidelity(self, sae_model, use_all_batches: bool = False) -> dict:
-        batches = (
-            self.tokenized_batches
-            if use_all_batches or self.fidelity_n_batches is None or len(self.tokenized_batches) <= self.fidelity_steps
-            else self.tokenized_batches[:np.random.choice(len(self.tokenized_batches), self.fidelity_steps, replace=False)]
-        )
+        if use_all_batches or self.fidelity_n_batches is None or len(self.tokenized_batches) <= self.fidelity_n_batches:
+            batches = self.tokenized_batches
+        else:
+            indices = np.random.choice(len(self.tokenized_batches), self.fidelity_n_batches, replace=False)
+            batches = [self.tokenized_batches[i] for i in indices]
         sae_loss = self._CE_from_sae_recon(batches, sae_model)
 
         loss_recovered = calculate_loss_recovered(
@@ -415,11 +415,11 @@ class ProGenFidelityFunction(EvaluationManager):
         print("Finished initializing ProGen2 Fidelity Function")
 
     def _calculate_fidelity(self, sae_model, use_all_batches: bool = False) -> dict:
-        batches = (
-            self.tokenized_batches
-            if use_all_batches or self.fidelity_n_batches is None or len(self.tokenized_batches) <= self.fidelity_steps
-            else self.tokenized_batches[:np.random.choice(len(self.tokenized_batches), self.fidelity_steps, replace=False)]
-        )
+        if use_all_batches or self.fidelity_n_batches is None or len(self.tokenized_batches) <= self.fidelity_n_batches:
+            batches = self.tokenized_batches
+        else:
+            indices = np.random.choice(len(self.tokenized_batches), self.fidelity_n_batches, replace=False)
+            batches = [self.tokenized_batches[i] for i in indices]
         sae_loss = self._CE_from_sae_recon(batches, sae_model)
 
         loss_recovered = calculate_loss_recovered(
