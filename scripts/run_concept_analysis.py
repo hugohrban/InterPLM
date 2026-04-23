@@ -53,6 +53,7 @@ EMBEDDINGS_BASE_MAP: dict[str, str] = {
     "esm2-650m":        "esm2_650m", # published ESM-2-650M SAEs
     "esm2-650M":        "esm2_650m", # published ESM-2-650M SAEs
     "progen2-small":    "progen2_small",
+    "progen2-large":    "progen2_large",
 }
 
 # Published SAE model name → dummy config key used in interplm/sae/migration/

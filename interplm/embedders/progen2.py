@@ -17,6 +17,7 @@ class ProGen2(BaseEmbedder):
 
     MODEL_DIMS = {
         "hugohrban/progen2-small": 1024,
+        "hugohrban/progen2-large": 2560,
     }
 
     def __init__(
