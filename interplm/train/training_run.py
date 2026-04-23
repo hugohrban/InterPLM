@@ -376,7 +376,7 @@ class SAETrainingRun:
 
         try:
             # Run fidelity evaluation one last time on full dataset
-            final_fidelity = self.evaluation_manager._calculate_fidelity(self.trainer.ae, use_all_batches=False)
+            final_fidelity = self.evaluation_manager._calculate_fidelity(self.trainer.ae, use_all_batches=True)
 
             # Save results to YAML file in model directory
             results_file = self.checkpoint_manager.save_dir / "final_evaluation.yaml"

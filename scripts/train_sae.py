@@ -94,7 +94,7 @@ def main(
     # ReLU-specific
     l1_penalty: float = 0.06,
     l1_penalty_warmup_steps: Optional[int] = None,
-    resample_steps: Optional[int] = None,
+    resample_steps: Optional[int] = 20000,
     # TopK / BatchTopK-specific
     k: int = 32,
     auxk_alpha: float = 1 / 32,
