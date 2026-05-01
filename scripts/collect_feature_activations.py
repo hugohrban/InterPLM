@@ -46,7 +46,9 @@ def collect_feature_activations(
     elif shard_range is not None:
         shards = list(range(shard_range[0], shard_range[1] + 1))
     elif shards is None:
-        shards = [0]  # Default to shard 0
+        shards = sorted(int(p.stem.split("_")[1]) for p in Path(embeddings_dir).glob("shard_*.pt"))
+        if not shards:
+            shards = [0]
 
     # Set output directory
     if output_dir is None:
