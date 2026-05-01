@@ -297,8 +297,15 @@ def process_shard(
             end = min(start + token_chunk_size, n_tokens)
             aa_chunk = aa_embeddings[start:end]  # (chunk, d_model)
 
-            # One SAE pass for all features — replaces the 40-chunk feature loop
-            sae_feats = sae.encode_feat_subset(aa_chunk, all_features)  # (chunk, n_features)
+            # One SAE pass for all features — replaces the 40-chunk feature loop.
+            # normalize_features=True divides by activation_rescale_factor (per-feature
+            # max), so the threshold_percents in [0, 1] act as fractions of each
+            # feature's peak activation. Without this, thresholds 0/0.15/0.5/0.6 all
+            # collapse to the same result for BatchTopK (its learned scalar floor
+            # already zeros everything below ~0.75).
+            sae_feats = sae.encode_feat_subset(
+                aa_chunk, all_features, normalize_features=True
+            )  # (chunk, n_features)
 
             labels_bin_chunk = labels_binary[start:end]  # (chunk, n_concepts)
             labels_chunk = labels_gpu[start:end]          # (chunk, n_concepts)
