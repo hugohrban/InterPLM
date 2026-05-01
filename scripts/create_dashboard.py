@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Optional, List
 from interplm.dashboard.dashboard_cache import DashboardCache
 from interplm.dashboard.protein_metadata import UniProtMetadata
-from interplm.sae.dictionary import ReLUSAE
+import torch as t
+from interplm.sae.dictionary import ReLUSAE, BatchTopKSAE, TopKSAE
 
 
 def create_dashboard(
@@ -120,11 +121,21 @@ def create_dashboard(
     else:
         concept_enrichment_path = None
 
+    # Auto-detect SAE class from checkpoint keys
+    _state_dict = t.load(sae_path, map_location="cpu")
+    if "k" in _state_dict and "threshold" in _state_dict and "b_dec" in _state_dict:
+        sae_cls = BatchTopKSAE
+    elif "k" in _state_dict:
+        sae_cls = TopKSAE
+    else:
+        sae_cls = ReLUSAE
+    print(f"Detected SAE class: {sae_cls.__name__}")
+
     # Add layer with SAE
     print(f"Adding layer: {layer_name}")
     cache.add_layer(
         layer_name=layer_name,
-        sae_cls=ReLUSAE,
+        sae_cls=sae_cls,
         sae_path=sae_path,
         feature_stats_dir=sae_path.parent,  # Pre-computed stats from collect_feature_activations.py
         aa_embeds_dir=embeddings_dir,  # For random feature sampling
