@@ -47,30 +47,24 @@ class ProteinFeatureVisualizer:
         self.dashboard_data = self._load_data(cache_dir)
         self.device = get_device()
 
-        # Initialize embedder for ESM models
-        self.esm_embedder = None
-        # Initialize embedder if model_name and model_type are provided
-        if hasattr(self.dashboard_data, 'model_name') and hasattr(self.dashboard_data, 'model_type'):
-            if self.dashboard_data.model_name and self.dashboard_data.model_type:
-                # Get default device, but avoid MPS due to bugs that corrupt embeddings
-                embedder_device = get_device()
-                if embedder_device == "mps":
-                    embedder_device = "cpu"
+        # Loaded lazily on first use to avoid downloading the model at startup
+        self.embedder = None
+        self._embedder_loaded = False
 
-                # Use the model_name from dashboard metadata (e.g., 'esm', 'progen2')
-                embedder_type = self.dashboard_data.model_name
-                model_name = self.dashboard_data.model_type
-
-                # For ESM models, prepend 'facebook/' if not already present
-                if embedder_type == 'esm' and not model_name.startswith('facebook/'):
-                    model_name = f"facebook/{model_name}"
-
-                self.esm_embedder = get_embedder(
-                    embedder_type,
-                    model_name=model_name,
-                    device=embedder_device
-                )
-
+    def _load_embedder(self):
+        self._embedder_loaded = True
+        if not (hasattr(self.dashboard_data, 'model_name') and hasattr(self.dashboard_data, 'model_type')):
+            return
+        if not (self.dashboard_data.model_name and self.dashboard_data.model_type):
+            return
+        embedder_device = get_device()
+        if embedder_device == "mps":
+            embedder_device = "cpu"
+        embedder_type = self.dashboard_data.model_type
+        model_name = self.dashboard_data.model_name
+        if embedder_type == 'esm' and not model_name.startswith('facebook/'):
+            model_name = f"facebook/{model_name}"
+        self.embedder = get_embedder(embedder_type, model_name=model_name, device=embedder_device)
 
     @property
     def protein_id_col(self):
@@ -767,9 +761,11 @@ class ProteinFeatureVisualizer:
         for idx, (_, protein) in enumerate(proteins.iterrows()):
             try:
                 # Get feature activations (ESM only)
-                if self.esm_embedder is None:
-                    raise ValueError("ESM embedder not initialized")
-                embeddings_np = self.esm_embedder.embed_single_sequence(
+                if not self._embedder_loaded:
+                    self._load_embedder()
+                if self.embedder is None:
+                    raise ValueError("Embedder could not be loaded for this model")
+                embeddings_np = self.embedder.embed_single_sequence(
                     sequence=protein[self.sequence_col],
                     layer=layer_num
                 )
