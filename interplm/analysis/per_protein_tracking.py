@@ -315,9 +315,14 @@ def find_max_examples_per_feat(
         activation_threshold=activation_threshold,
     )
 
+    # Pre-compute total chunk count for the single progress bar
+    feature_chunks = list(split_up_feature_list(total_features, max_feature_chunk_size=feature_chunk_size))
+    total_chunks = len(shards_to_search) * len(feature_chunks)
+    pbar = tqdm(total=total_chunks, desc="Processing shards")
+
     # Process each shard of data
     for shard_idx, shard in enumerate(shards_to_search):
-        print(f"Processing shard {shard} ({shard_idx+1}/{len(shards_to_search)})...")
+        pbar.set_description(f"Shard {shard} ({shard_idx+1}/{len(shards_to_search)})")
 
         try:
             # Load embeddings - get full data with metadata if available
@@ -353,13 +358,7 @@ def find_max_examples_per_feat(
                 prot_id_to_idx[prot_id].append(i)
 
             # Process features in chunks to manage memory
-            for feature_list in tqdm(
-                split_up_feature_list(
-                    total_features=total_features,
-                    max_feature_chunk_size=feature_chunk_size,
-                ),
-                desc=f"Processing feature chunks for shard {shard}",
-            ):
+            for feature_list in feature_chunks:
                 # Get SAE features for current chunk
                 sae_feats = get_sae_feats_in_batches(
                     sae=sae,
@@ -384,6 +383,7 @@ def find_max_examples_per_feat(
 
                 # Free memory after processing all proteins for this feature chunk
                 del sae_feats
+                pbar.update(1)
 
             # Clear shard data to free memory
             del aa_embeddings
@@ -391,7 +391,9 @@ def find_max_examples_per_feat(
             del prot_id_to_idx
 
         except Exception as e:
+            pbar.close()
             print(f"Error processing shard {shard}: {e}")
             raise e
 
+    pbar.close()
     return tracker.get_results()
