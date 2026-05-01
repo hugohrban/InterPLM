@@ -6,6 +6,15 @@ import pandas as pd
 
 logger = getLogger(__name__)
 
+# Strip trailing instance index (e.g. "Sushi 1" → "Sushi", "EF-hand 3" → "EF-hand").
+# UniProtKB numbers repeated copies of the same domain within a protein; for ML
+# purposes all copies are the same concept.
+_TRAILING_INDEX_RE = re.compile(r'\s+\d+$')
+
+
+def normalize_note(note: str) -> str:
+    return _TRAILING_INDEX_RE.sub("", note)
+
 
 def process_binary_feature(
     column_data: str, column_name: str, seq_len: int, current_index: int
@@ -116,11 +125,9 @@ def process_categorical_feature(
         positions_in_entry = entry.split(";")[0]
         entry_category = re.search(rf'/{separator_name}="([^"]+)"', entry)
         if entry_category:
-            entry_category = entry_category.group(1).split(";")[0]
+            entry_category = normalize_note(entry_category.group(1).split(";")[0])
 
-            if entry_category not in category_options:
-                # skip this one
-                continue
+            known_category = entry_category if entry_category in category_options else None
 
             indices_in_entry = []
             try:
@@ -138,13 +145,14 @@ def process_categorical_feature(
                     indices_in_entry = [int(positions_in_entry)]
                 for index in indices_in_entry:
                     if 0 <= index - 1 < seq_len:
-                        if entry_category in category_options:
-                            category_indices[entry_category][index - 1] = current_index[
-                                entry_category
+                        if known_category is not None:
+                            category_indices[known_category][index - 1] = current_index[
+                                known_category
                             ]
                         category_indices["any"][index - 1] = current_index["any"]
 
-                current_index[entry_category] += 1
+                if known_category is not None:
+                    current_index[known_category] += 1
                 current_index["any"] += 1
 
             except Exception as e:
@@ -179,7 +187,7 @@ def analyze_categorical_features(
             note = note[:note_end].strip('"')
 
             if "/evidence" not in note:
-                all_notes.append(note)
+                all_notes.append(normalize_note(note))
 
             try:
                 # Extract length
