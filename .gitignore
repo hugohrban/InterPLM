@@ -28,6 +28,7 @@ dms*
 *.cif
 *latest-run*
 *.full
+*.out
 *.DS_Store
 *analysis/*
 */data/*
