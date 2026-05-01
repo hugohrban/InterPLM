@@ -26,7 +26,7 @@ class BatchTopKTrainerConfig(SAETrainerConfig):
     threshold_start_step: int = 1000
 
     # Dead feature threshold
-    dead_feature_threshold: int = 10_000_000
+    dead_feature_threshold: int = 20_000_000
 
     def __post_init__(self):
         if self.lr is None:
