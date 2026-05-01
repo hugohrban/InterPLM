@@ -208,6 +208,7 @@ class ReLUTrainer(SAETrainer):
             # Use a small random perturbation of the sampled activations
             noise_scale = 0.01
             new_encoder_weights = sampled_activations + noise_scale * t.randn_like(sampled_activations)
+            new_encoder_weights = new_encoder_weights.to(self.ae.encoder.weight.dtype)
             self.ae.encoder.weight.data[dead_neurons] = new_encoder_weights / new_encoder_weights.norm(dim=1, keepdim=True)
             
             # Reinitialize encoder bias for dead neurons
