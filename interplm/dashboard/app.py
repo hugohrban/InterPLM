@@ -13,6 +13,7 @@ import streamlit as st
 import torch
 
 from interplm.dashboard.colors import get_structure_palette_and_colormap
+from interplm.dashboard.concept_explorer import render_concept_explorer
 from interplm.dashboard.feature_activation_vis import (
     plot_activation_scatter,
     plot_activations_for_single_feat,
@@ -149,7 +150,6 @@ class ProteinFeatureVisualizer:
 
     def setup_sidebar(self) -> DashboardState:
         """Configure sidebar controls and return dashboard state"""
-        st.sidebar.markdown(help_notes["overall"], unsafe_allow_html=True)
         st.sidebar.markdown(
             f"## Select {self.dashboard_data.model_type} Layer and Feature",
             help=help_notes["select_esm_layer"],
@@ -895,13 +895,32 @@ def main(cache_dir: str):
     st.title("InterPLM Feature Visualization")
 
     visualizer = ProteinFeatureVisualizer(cache_dir=Path(cache_dir))
-    state = visualizer.setup_sidebar()
 
-    visualizer.display_feature_statistics(state.layer, state.feature_id)
+    st.sidebar.markdown(help_notes["overall"], unsafe_allow_html=True)
+    dashboard_mode = st.sidebar.radio(
+        "View mode",
+        ["Feature Explorer", "Concept Explorer"],
+        key="dashboard_mode",
+    )
+    st.sidebar.markdown("---")
 
-    # Show proteins by default, or when button is clicked
-    if state.show_proteins or True:  # Always show unless explicitly disabled
-        visualizer.visualize_proteins(state)
+    if dashboard_mode == "Feature Explorer":
+        state = visualizer.setup_sidebar()
+        visualizer.display_feature_statistics(state.layer, state.feature_id)
+        if state.show_proteins or True:  # Always show unless explicitly disabled
+            visualizer.visualize_proteins(state)
+    else:
+        available_layers = sorted(visualizer.dashboard_data.layers)
+        if len(available_layers) == 1:
+            layer = available_layers[0]
+        else:
+            layer = st.sidebar.selectbox(
+                "Select model embedding layer",
+                available_layers,
+                key="ce_layer_select",
+            )
+        layer_data = visualizer.dashboard_data.data[layer]
+        render_concept_explorer(visualizer.dashboard_data, layer, layer_data)
 
 
 if __name__ == "__main__":

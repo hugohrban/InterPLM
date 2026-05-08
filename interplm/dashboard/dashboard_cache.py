@@ -105,6 +105,8 @@ class DashboardCache:
         ae_cls = layer_info["SAE_cls"]
         layer_data["aa_embeds_dir"] = layer_info["aa_embeds_dir"]
         layer_data["aa_metadata_dir"] = layer_info["aa_metadata_dir"]
+        layer_data["sae_dir"] = layer_info.get("sae_dir")
+        layer_data["annot_dir"] = layer_info.get("annot_dir")
 
         # Load SAE on the correct device to avoid device mismatch
         device = get_device()
@@ -192,6 +194,9 @@ class DashboardCache:
         shards_to_search: Optional[List[int]] = None,
         # Additional optional things to plot
         concept_enrichment_path: Optional[Path] = None,
+        # Paths needed for Concept Explorer
+        sae_dir: Optional[Path] = None,
+        annot_dir: Optional[Path] = None,
         overwrite: bool = True,
     ) -> None:
         """Add a new layer to the dashboard cache"""
@@ -216,6 +221,8 @@ class DashboardCache:
                     "aa_embeds_dir": aa_embeds_dir,
                     "aa_metadata_dir": aa_metadata_dir,
                     "shards_to_search": shards_to_search,
+                    "sae_dir": str(sae_dir) if sae_dir is not None else None,
+                    "annot_dir": str(annot_dir) if annot_dir is not None else None,
                 },
                 f,
             )

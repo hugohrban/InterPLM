@@ -30,6 +30,8 @@ def create_dashboard(
     uniprot_id_col: str = "Entry",
     protein_name_col: str = "Protein names",
     sequence_col: str = "Sequence",
+    sae_dir: Optional[Path] = None,
+    annot_dir: Optional[Path] = None,
 ):
     """
     Create a dashboard cache for visualizing SAE features.
@@ -141,6 +143,8 @@ def create_dashboard(
         aa_embeds_dir=embeddings_dir,  # For random feature sampling
         shards_to_search=shards_to_search,
         concept_enrichment_path=concept_enrichment_path,  # Optional concept analysis
+        sae_dir=Path(sae_path).parent if sae_dir is None else Path(sae_dir),
+        annot_dir=Path(annot_dir) if annot_dir is not None else None,
         overwrite=True
     )
 

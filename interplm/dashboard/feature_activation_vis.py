@@ -26,6 +26,7 @@ def visualize_protein_feature(
     metadata,
     characteristic_to_plot="Amino Acids",
     ss_to_full_name=None,
+    annotation_indices=None,
 ):
     # if feature acts is a torch convert to numpy
     if hasattr(feature_acts, "detach"):
@@ -84,6 +85,18 @@ def visualize_protein_feature(
     )
     fig.update_xaxes(showgrid=False, zeroline=False)
     fig.update_yaxes(showgrid=False, zeroline=False)
+
+    if annotation_indices:
+        for idx in annotation_indices:
+            if 0 <= idx < len(sequence):
+                fig.add_vrect(
+                    x0=idx - 0.5,
+                    x1=idx + 0.5,
+                    fillcolor="rgba(0, 200, 100, 0.25)",
+                    line_width=0,
+                    layer="below",
+                )
+
     return fig
 
 
