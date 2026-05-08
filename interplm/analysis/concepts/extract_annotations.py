@@ -179,6 +179,34 @@ def subsample_proteins(
     return df.sample(n=n, random_state=random_state).reset_index(drop=True)
 
 
+def subsample_proteins_force_include(
+    df: pd.DataFrame,
+    n: int,
+    force_include_pattern: str,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Select n proteins, force-including all that match force_include_pattern in Domain [FT]."""
+    if n >= len(df):
+        logger.warning(
+            f"Requested {n} proteins but only {len(df)} available; returning all."
+        )
+        return df.reset_index(drop=True)
+
+    forced = df[df["Domain [FT]"].str.contains(force_include_pattern, na=False)]
+    rest = df[~df.index.isin(forced.index)]
+
+    n_remaining = n - len(forced)
+    if n_remaining <= 0:
+        logger.warning(
+            f"Force-include pattern '{force_include_pattern}' matched {len(forced)} proteins, "
+            f"which already meets or exceeds requested n={n}; returning all {len(forced)} matches."
+        )
+        return forced.reset_index(drop=True)
+
+    sampled = rest.sample(n=n_remaining, random_state=random_state)
+    return pd.concat([forced, sampled]).reset_index(drop=True)
+
+
 def enumerate_protein_subcategories(
     df: pd.DataFrame,
     min_required_instances: int = 100,
@@ -311,7 +339,8 @@ def main(
     df = preprocess_proteins(df, min_protein_length)
     print(f"{df.shape=}")
     if n_proteins is not None:
-        df = subsample_proteins(df, n_proteins)
+        # df = subsample_proteins(df, n_proteins)
+        df = subsample_proteins_force_include(df, n_proteins, "Sushi")
         print(f"After subsampling: {df.shape=}")
     print(f"{df.head()=}")
     shard_protein_data(df, output_dir, n_shards, overwrite=overwrite)
@@ -319,33 +348,16 @@ def main(
     # Dynamically determine which sub-categories are abundant enough to include
     categorical_options = enumerate_protein_subcategories(df, min_required_instances)
     print(f"{categorical_concepts=}")
+    # return
 
     # Build separator map: col_name → field name used in raw UniProtKB annotation
     # Most types use /note="...", but e.g. Binding site uses /ligand="..."
     categorical_separators = {c[0]: c[2] for c in categorical_concepts}
 
     # Process shards sequentially
-    # for shard in range(n_shards):
-    #     try:
-    #         convert_shard_to_amino_acid_features(
-    #             shard_id=shard,
-    #             input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
-    #             output_dir=output_dir,
-    #             categorical_options=categorical_options,
-    #             binary_cols=binary_meta_cols,
-    #             interaction_cols=paired_binary_cols,
-    #             categorical_separators=categorical_separators,
-    #             overwrite=overwrite,
-    #         )
-    #         logger.info(f"Successfully completed processing shard {shard}")
-    #     except Exception as e:
-    #         logger.error(f"Shard {shard} generated an exception: {e}")
-
-    # Process shards in parallel
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(
-                convert_shard_to_amino_acid_features,
+    for shard in range(n_shards):
+        try:
+            convert_shard_to_amino_acid_features(
                 shard_id=shard,
                 input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
                 output_dir=output_dir,
@@ -355,13 +367,31 @@ def main(
                 categorical_separators=categorical_separators,
                 overwrite=overwrite,
             )
-            for shard in range(n_shards)
-        ]
-        for future in futures:
-            try:
-                future.result()
-            except Exception as e:
-                logger.error(f"Shard processing generated an exception: {e}")
+            logger.info(f"Successfully completed processing shard {shard}")
+        except Exception as e:
+            logger.error(f"Shard {shard} generated an exception: {e}")
+
+    # Process shards in parallel
+    # with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    #     futures = [
+    #         executor.submit(
+    #             convert_shard_to_amino_acid_features,
+    #             shard_id=shard,
+    #             input_path=output_dir / f"shard_{shard}" / "protein_data.tsv",
+    #             output_dir=output_dir,
+    #             categorical_options=categorical_options,
+    #             binary_cols=binary_meta_cols,
+    #             interaction_cols=paired_binary_cols,
+    #             categorical_separators=categorical_separators,
+    #             overwrite=overwrite,
+    #         )
+    #         for shard in range(n_shards)
+    #     ]
+    #     for future in futures:
+    #         try:
+    #             future.result()
+    #         except Exception as e:
+    #             logger.error(f"Shard processing generated an exception: {e}")
 
     logger.info("UniProt data processing complete!")
 
