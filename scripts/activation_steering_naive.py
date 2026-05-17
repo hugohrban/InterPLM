@@ -3,7 +3,7 @@
 Experimental activation steering via SAE feature intervention.
 
 Intercepts a PLM layer's hidden state during generation, encodes it with a
-trained SAE, modifies a single feature's activation, then decodes back into
+trained SAE, modifies one or more feature activations, then decodes back into
 hidden-state space. Two steering methods are supported:
 
   direct     — h_steered = decode(modified_acts)
@@ -14,31 +14,26 @@ Clamp values are normalised by default: 1.0 = max observed activation for
 that feature during training (stored in ae_normalized.pt). Pass
 --use_raw_clamp_values to supply literal activation-space values instead.
 
-Usage:
-    # Default: clamp feature 42 to its max observed activation, 10 sequences
+Single-feature usage:
     python scripts/activation_steering_naive.py \
         --sae_dir trained_saes/best_progen_large_24 \
-        --feature_id 42 \
-        --output_fasta out/steered.fasta
+        --feature_id 42 --clamp_value 5.0
 
-    # Ablate feature 42
     python scripts/activation_steering_naive.py \
         --sae_dir trained_saes/best_progen_large_24 \
-        --feature_id 42 --mode ablate \
-        --output_fasta out/ablated.fasta
+        --feature_id 42 --mode ablate
 
-    # Half max, with-error reconstruction, seeded prefix
+Multi-feature usage (--features overrides --feature_id / --clamp_value):
     python scripts/activation_steering_naive.py \
         --sae_dir trained_saes/best_progen_large_24 \
-        --feature_id 42 --clamp_value 0.5 \
-        --steering_method with_error --prefix MKTAY \
-        --output_fasta out/steered_half.fasta
+        --features 5900:5.0 42:2.0 --mode clamp
 """
 
 from pathlib import Path
 from typing import Optional
 
 import json
+import math
 import yaml
 import torch
 from tqdm import tqdm
@@ -94,12 +89,69 @@ def load_config_info(sae_dir: Path) -> tuple[str, int, str]:
 
 def get_layer_module(model: torch.nn.Module, embedder_type: str, layer_idx: int) -> torch.nn.Module:
     if embedder_type == "progen2":
-        return model.transformer.h[layer_idx]
+        # hidden_states[k] from output_hidden_states=True equals the output of h[k-1],
+        # so to hook the same activations the SAE was trained on we must hook h[layer_idx - 1].
+        if layer_idx < 1:
+            raise ValueError(
+                f"layer_idx must be >= 1 for progen2 (layer 0 is the raw embedding with no "
+                f"transformer block to hook). Got layer_idx={layer_idx}."
+            )
+        n_layers = len(model.transformer.h)
+        if layer_idx > n_layers:
+            raise ValueError(
+                f"layer_idx={layer_idx} is out of range for this model ({n_layers} blocks). "
+                f"Valid range: 1–{n_layers}."
+            )
+        if layer_idx == n_layers:
+            # Final hidden state passes through ln_f; hook that to match hidden_states[n_layers].
+            return model.transformer.ln_f
+        return model.transformer.h[layer_idx - 1]
     raise NotImplementedError(
         f"Activation steering during generation is not yet supported for "
         f"embedder_type={embedder_type!r}. ESM-2 is a masked LM and does not "
         "support autoregressive generation."
     )
+
+
+def verify_hook_target(
+    model: torch.nn.Module,
+    layer_module: torch.nn.Module,
+    layer_idx: int,
+    tokenizer,
+    device: str,
+    atol: float = 1e-5,
+) -> None:
+    """Assert that the forward hook on layer_module captures hidden_states[layer_idx].
+
+    Runs one forward pass with a short dummy sequence, compares the value captured
+    by a hook on layer_module against outputs.hidden_states[layer_idx].
+    Raises AssertionError with max |diff| if they disagree.
+    """
+    seq_str = "1MKTAY2"
+    ids = tokenizer(seq_str, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+
+    captured: dict = {}
+
+    def _cap(m, inp, out):
+        is_tuple = isinstance(out, tuple)
+        captured["h"] = (out[0] if is_tuple else out).detach().clone()
+
+    handle = layer_module.register_forward_hook(_cap)
+    try:
+        with torch.no_grad():
+            out = model(input_ids=ids, output_hidden_states=True)
+    finally:
+        handle.remove()
+
+    hs = out.hidden_states[layer_idx]
+    if not torch.allclose(captured["h"], hs, atol=atol):
+        max_diff = (captured["h"] - hs).abs().max().item()
+        raise AssertionError(
+            f"Hook capture does not match hidden_states[{layer_idx}]! "
+            f"max |diff| = {max_diff:.2e}  (atol={atol:.0e}). "
+            "Check get_layer_module() for this embedder type and layer index."
+        )
+    print(f"[verify] Hook on layer_module == hidden_states[{layer_idx}]  (max |diff| < {atol:.0e})")
 
 
 # ---------------------------------------------------------------------------
@@ -108,17 +160,19 @@ def get_layer_module(model: torch.nn.Module, embedder_type: str, layer_idx: int)
 
 def make_steering_hook(
     sae: torch.nn.Module,
-    feature_id: int,
-    raw_steer_value: float,
+    feature_specs: list[tuple[int, float]],
     mode: str,
     use_error: bool,
 ) -> callable:
     """
     Returns a forward hook that intercepts a layer's hidden state and steers
-    feature `feature_id` to `raw_steer_value` (in raw SAE activation space).
+    one or more features. `feature_specs` is a list of (feature_id, raw_value)
+    pairs; all features are modified with the same `mode`.
     """
     def hook_fn(module, input, output):
-        h = output[0]                              # [batch, seq_len, d_model]
+        # ln_f returns a bare tensor; all other blocks return a tuple
+        is_tuple = isinstance(output, tuple)
+        h = output[0] if is_tuple else output      # [batch, seq_len, d_model]
         orig_shape = h.shape
         flat_h = h.reshape(-1, orig_shape[-1])     # [N, d_model]
 
@@ -127,21 +181,22 @@ def make_steering_hook(
         if use_error:
             error = flat_h - sae.decode(acts.clone())  # SAE residual
 
-        if mode == "clamp":
-            acts[:, feature_id] = raw_steer_value
-        elif mode == "add":
-            acts[:, feature_id] = acts[:, feature_id] + raw_steer_value
-        elif mode == "ablate":
-            acts[:, feature_id] = 0.0
-        else:
-            raise ValueError(f"Unknown mode {mode!r}. Choose: clamp, add, ablate.")
+        for feature_id, raw_steer_value in feature_specs:
+            if mode == "clamp":
+                acts[:, feature_id] = raw_steer_value
+            elif mode == "add":
+                acts[:, feature_id] = acts[:, feature_id] + raw_steer_value
+            elif mode == "ablate":
+                acts[:, feature_id] = 0.0
+            else:
+                raise ValueError(f"Unknown mode {mode!r}. Choose: clamp, add, ablate.")
 
         h_steered = sae.decode(acts)
         if use_error:
             h_steered = h_steered + error
 
         h_steered = h_steered.reshape(orig_shape).to(h.dtype)
-        return (h_steered,) + output[1:]
+        return (h_steered,) + output[1:] if is_tuple else h_steered
 
     return hook_fn
 
@@ -181,8 +236,8 @@ def _entropy_bits(probs: torch.Tensor) -> float:
 def generate_one(
     model: torch.nn.Module,
     tokenizer,
-    layer_module: torch.nn.Module,
-    hook_fn: callable,
+    layer_module: Optional[torch.nn.Module],
+    hook_fn: Optional[callable],
     prefix: Optional[str],
     max_new_tokens: int,
     temperature: float,
@@ -193,7 +248,10 @@ def generate_one(
     vocab: Optional[dict] = None,
 ) -> tuple[str, list[dict]]:
     """
-    Generate one sequence with the steering hook active throughout.
+    Generate one sequence, optionally with a steering hook active throughout.
+
+    Pass layer_module=None / hook_fn=None to generate from the base model
+    without any SAE intervention (mode="none").
 
     Returns (sequence, debug_steps) where debug_steps is [] when collect_debug=False.
 
@@ -207,20 +265,22 @@ def generate_one(
 
     debug_steps: list[dict] = []
     inv_vocab = {v: k for k, v in vocab.items()} if vocab else {}
-    handle = layer_module.register_forward_hook(hook_fn)
+    steered = layer_module is not None and hook_fn is not None
+    handle = layer_module.register_forward_hook(hook_fn) if steered else None
     try:
         with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False) as pbar:
             for step in range(max_new_tokens):
-                # Steered logits — hook is active
                 with torch.no_grad():
                     logits_steered = model(input_ids=ids).logits[0, -1]   # [vocab_size]
 
                 if collect_debug:
                     # Base logits — temporarily remove hook for one clean forward pass
-                    handle.remove()
+                    if steered:
+                        handle.remove()
                     with torch.no_grad():
                         logits_base = model(input_ids=ids).logits[0, -1]
-                    handle = layer_module.register_forward_hook(hook_fn)
+                    if steered:
+                        handle = layer_module.register_forward_hook(hook_fn)
 
                 logits = logits_steered
                 if not torch.isfinite(logits).all():
@@ -260,11 +320,122 @@ def generate_one(
                 if next_id.item() == eos_token_id:
                     break
     finally:
-        handle.remove()
+        if handle is not None:
+            handle.remove()
 
     # Decode and strip terminus tokens ("1" and "2")
     raw = tokenizer.decode(ids[0], skip_special_tokens=False)
     return raw.strip().strip("12").strip(), debug_steps
+
+
+# ---------------------------------------------------------------------------
+# Batched generation
+# ---------------------------------------------------------------------------
+
+def generate_batch(
+    model: torch.nn.Module,
+    tokenizer,
+    layer_module: Optional[torch.nn.Module],
+    hook_fn: Optional[callable],
+    prefix: Optional[str],
+    batch_size: int,
+    max_new_tokens: int,
+    temperature: float,
+    do_sample: bool,
+    eos_token_id: int,
+    device: str,
+    collect_debug: bool = False,
+    vocab: Optional[dict] = None,
+) -> tuple[list[str], list[list[dict]]]:
+    """
+    Generate `batch_size` sequences in parallel, optionally with a steering hook.
+
+    All sequences start from the same prefix (or BOS if None). Sequences that
+    reach EOS early are frozen while the rest of the batch continues. Returns
+    (sequences, debug_steps_per_seq); debug_steps_per_seq[i] is empty when
+    collect_debug=False.
+    """
+    seq_str = ("1" + prefix) if prefix else "1"
+    single_ids = tokenizer(seq_str, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+    ids = single_ids.expand(batch_size, -1).clone()  # [B, prefix_len]
+
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    inv_vocab = {v: k for k, v in vocab.items()} if vocab else {}
+
+    steered = layer_module is not None and hook_fn is not None
+    handle = layer_module.register_forward_hook(hook_fn) if steered else None
+
+    batch_debug: list[list[dict]] = [[] for _ in range(batch_size)]
+
+    try:
+        with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False) as pbar:
+            for step in range(max_new_tokens):
+                if finished.all():
+                    break
+
+                with torch.no_grad():
+                    logits_steered = model(input_ids=ids).logits[:, -1]  # [B, vocab]
+
+                if collect_debug:
+                    if steered:
+                        handle.remove()
+                    with torch.no_grad():
+                        logits_base = model(input_ids=ids).logits[:, -1]
+                    if steered:
+                        handle = layer_module.register_forward_hook(hook_fn)
+
+                logits = logits_steered
+                if not torch.isfinite(logits).all():
+                    logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+
+                if do_sample:
+                    probs = F.softmax(logits / temperature, dim=-1)  # [B, vocab]
+                    next_ids = torch.multinomial(probs, 1)            # [B, 1]
+                else:
+                    next_ids = logits.argmax(dim=-1, keepdim=True)    # [B, 1]
+
+                # Freeze finished sequences so their tokens don't corrupt decoding
+                next_ids[finished] = eos_token_id
+
+                if collect_debug:
+                    t = temperature if temperature != 0 else 1.0
+                    p_s = F.softmax(logits_steered.float() / t, dim=-1).cpu()
+                    p_b = F.softmax(logits_base.float() / t, dim=-1).cpu()
+                    for b_idx in range(batch_size):
+                        if finished[b_idx]:
+                            continue
+                        kl = F.kl_div(
+                            F.log_softmax(logits_base[b_idx].float() / t, dim=-1).cpu(),
+                            p_s[b_idx],
+                            reduction="sum",
+                        ).item()
+                        batch_debug[b_idx].append({
+                            "step": step,
+                            "chosen_token": inv_vocab.get(next_ids[b_idx].item(), "?"),
+                            "base": {
+                                "aa_probs": _aa_probs(p_b[b_idx], vocab),
+                                "entropy": _entropy_bits(p_b[b_idx]),
+                            },
+                            "steered": {
+                                "aa_probs": _aa_probs(p_s[b_idx], vocab),
+                                "entropy": _entropy_bits(p_s[b_idx]),
+                            },
+                            "kl_steered_from_base": round(kl, 6),
+                        })
+
+                ids = torch.cat([ids, next_ids], dim=1)
+                finished |= (next_ids.squeeze(1) == eos_token_id)
+                pbar.update(1)
+    finally:
+        if handle is not None:
+            handle.remove()
+
+    sequences = []
+    for b_idx in range(batch_size):
+        raw = tokenizer.decode(ids[b_idx], skip_special_tokens=False)
+        sequences.append(raw.strip().strip("12").strip())
+
+    return sequences, batch_debug
 
 
 # ---------------------------------------------------------------------------
@@ -466,14 +637,16 @@ def plot_steering_debug(
 
 def main(
     sae_dir: Path,
-    feature_id: int,
-    output_fasta: Path,
+    output_fasta: Optional[Path] = None,
+    feature_id: Optional[int] = None,
     clamp_value: float = 1.0,
+    features: Optional[list[str]] = None,
     use_raw_clamp_values: bool = False,
     mode: str = "clamp",
-    steering_method: str = "direct",
+    steering_method: str = "with_error",
     prefix: Optional[str] = None,
     n_sequences: int = 10,
+    batch_size: int = 1,
     max_new_tokens: int = 200,
     temperature: float = 1.0,
     do_sample: bool = True,
@@ -489,20 +662,30 @@ def main(
 
     Args:
         sae_dir: Directory containing a trained SAE (config.yaml + ae*.pt).
-        feature_id: Index of the SAE feature to steer.
+        feature_id: Index of the SAE feature to steer (single-feature interface).
+            Not required when mode="none" or when --features is used.
+        clamp_value: Steering magnitude for --feature_id. By default normalised:
+            1.0 = max observed activation; >1.0 = amplify beyond training max.
+            Use --use_raw_clamp_values for literal units.
+        features: Multi-feature interface. Each entry is "feature_id:clamp_value"
+            (e.g. "5900:5.0 42:2.0"). Overrides --feature_id / --clamp_value.
+            All features share the global --mode.
         output_fasta: Path to write the generated sequences in FASTA format.
-        clamp_value: Steering magnitude. By default normalised: 1.0 = max
-            observed activation for this feature; 0.0 = ablate; >1.0 = amplify
-            beyond training max. Use --use_raw_clamp_values for literal units.
-        use_raw_clamp_values: If True, clamp_value is used directly in raw
-            SAE activation units instead of being scaled by the per-feature max.
-        mode: How to modify the feature: 'clamp' (set to value), 'add' (shift
-            from current), or 'ablate' (set to 0).
-        steering_method: 'direct' replaces the hidden state with the SAE
-            reconstruction. 'with_error' adds back the SAE residual.
+            If not provided, auto-named from run parameters and written to
+            steering_outputs/.
+        use_raw_clamp_values: If True, clamp values are used directly in raw
+            SAE activation units instead of being scaled by per-feature maxima.
+        mode: How to modify features: 'clamp' (set to value), 'add' (shift
+            from current), 'ablate' (set to 0), or 'none' (bypass SAE entirely).
+        steering_method: 'with_error' (default) adds back the SAE residual to
+            preserve unmodelled signal. 'direct' replaces the hidden state
+            purely with the SAE reconstruction.
         prefix: Optional amino-acid prefix string. Generation continues from
             this prefix. If None, generation starts de novo from the BOS token.
-        n_sequences: Number of sequences to generate.
+        n_sequences: Minimum number of sequences to generate. The actual count
+            is ceil(n_sequences / batch_size) * batch_size when batch_size > 1.
+        batch_size: Number of sequences to generate in parallel per forward
+            pass. Values > 1 use generate_batch() and are faster on GPU.
         max_new_tokens: Maximum tokens to generate per sequence.
         temperature: Sampling temperature (ignored when do_sample=False).
         do_sample: Sample from the distribution; if False, use greedy decoding.
@@ -516,95 +699,173 @@ def main(
             For multiple sequences, index is appended: plot_output_seq0.png, etc.
         plot_max_steps: Cap the number of steps shown in the plot (default: all).
     """
+    # --- Resolve feature list ---
+    # --features takes precedence over --feature_id / --clamp_value
+    if features is not None:
+        feat_clamp_pairs: list[tuple[int, float]] = []
+        for spec in features:
+            parts = spec.split(":")
+            if len(parts) != 2:
+                raise ValueError(
+                    f"--features entries must be 'feature_id:clamp_value', got {spec!r}"
+                )
+            feat_clamp_pairs.append((int(parts[0]), float(parts[1])))
+    elif feature_id is not None:
+        feat_clamp_pairs = [(feature_id, clamp_value)]
+    else:
+        feat_clamp_pairs = []
+
+    if mode != "none" and not feat_clamp_pairs:
+        raise ValueError("--feature_id (or --features) is required unless --mode none")
+
     if seed is not None:
         torch.manual_seed(seed)
 
     device = device or get_device()
     sae_dir = Path(sae_dir)
 
-    # --- Load SAE and resolve raw steer value ---
-    sae_filename = "ae_normalized.pt" if use_normalized_sae else "ae.pt"
-    print(f"Loading SAE from {sae_dir / sae_filename} ...")
-    sae = load_sae(sae_dir, model_name=sae_filename, device=device)
-    sae.eval()
+    if mode == "none":
+        # --- No steering: load PLM only ---
+        model_name, layer_idx, embedder_type = load_config_info(sae_dir)
+        print(f"Loading {embedder_type} model {model_name!r} (no steering) ...")
+        embedder = get_embedder(embedder_type, model_name=model_name, device=device)
+        model = embedder.model
+        tokenizer = embedder.tokenizer
+        layer_module = None
+        hook_fn = None
+    else:
+        # --- Load SAE and resolve raw steer values ---
+        sae_filename = "ae_normalized.pt" if use_normalized_sae else "ae.pt"
+        print(f"Loading SAE from {sae_dir / sae_filename} ...")
+        sae = load_sae(sae_dir, model_name=sae_filename, device=device)
+        sae.eval()
 
-    rescale = sae.activation_rescale_factor[feature_id].item()
-    if not use_normalized_sae and not use_raw_clamp_values and abs(rescale - 1.0) < 1e-6:
-        print(
-            "WARNING: ae.pt has activation_rescale_factor≈1 (not populated). "
-            "Normalised clamp_value will not scale to the true per-feature max. "
-            "Either use ae_normalized.pt (default) or pass --use_raw_clamp_values."
+        raw_feature_specs: list[tuple[int, float]] = []
+        for fid, cv in feat_clamp_pairs:
+            rescale = sae.activation_rescale_factor[fid].item()
+            if not use_normalized_sae and not use_raw_clamp_values and abs(rescale - 1.0) < 1e-6:
+                print(
+                    f"WARNING: feature {fid}: ae.pt has activation_rescale_factor≈1 (not populated). "
+                    "Normalised clamp_value will not scale to the true per-feature max. "
+                    "Either use ae_normalized.pt (default) or pass --use_raw_clamp_values."
+                )
+            if mode == "ablate":
+                raw_val = 0.0
+                display = "0.0 (ablate)"
+            elif use_raw_clamp_values:
+                raw_val = cv
+                display = f"{cv:.4f} (raw)"
+            else:
+                raw_val = cv * rescale
+                display = f"{cv:.4f} (normalised) = {raw_val:.4f} raw"
+            print(f"Feature {fid}: max activation = {rescale:.4f}  steer = {display}")
+            raw_feature_specs.append((fid, raw_val))
+
+        print(f"mode={mode}  method={steering_method}")
+
+        # --- Infer PLM from config and load ---
+        model_name, layer_idx, embedder_type = load_config_info(sae_dir)
+        print(f"Loading {embedder_type} model {model_name!r}, layer {layer_idx} ...")
+        embedder = get_embedder(embedder_type, model_name=model_name, device=device)
+        model = embedder.model
+        tokenizer = embedder.tokenizer
+
+        layer_module = get_layer_module(model, embedder_type, layer_idx)
+        verify_hook_target(model, layer_module, layer_idx, tokenizer, device)
+        use_error = steering_method == "with_error"
+
+        hook_fn = make_steering_hook(
+            sae=sae,
+            feature_specs=raw_feature_specs,
+            mode=mode,
+            use_error=use_error,
         )
 
-    if mode == "ablate":
-        raw_steer_value = 0.0
-        display_value = "0.0 (ablate)"
-    elif use_raw_clamp_values:
-        raw_steer_value = clamp_value
-        display_value = f"{clamp_value:.4f} (raw)"
-    else:
-        raw_steer_value = clamp_value * rescale
-        display_value = f"{clamp_value:.4f} (normalised) = {raw_steer_value:.4f} raw"
-
-    print(f"Feature {feature_id}: max observed activation = {rescale:.4f}")
-    print(f"Steering value: {display_value}  mode={mode}  method={steering_method}")
-
-    # --- Infer PLM from config and load ---
-    model_name, layer_idx, embedder_type = load_config_info(sae_dir)
-    print(f"Loading {embedder_type} model {model_name!r}, layer {layer_idx} ...")
-    embedder = get_embedder(embedder_type, model_name=model_name, device=device)
-    model = embedder.model
-    tokenizer = embedder.tokenizer
-
-    layer_module = get_layer_module(model, embedder_type, layer_idx)
     eos_token_id = _get_eos_token_id(tokenizer)
-    use_error = steering_method == "with_error"
-
-    hook_fn = make_steering_hook(
-        sae=sae,
-        feature_id=feature_id,
-        raw_steer_value=raw_steer_value,
-        mode=mode,
-        use_error=use_error,
-    )
-
     collect_debug = debug_output is not None or plot_output is not None
     vocab = tokenizer.get_vocab() if collect_debug else None
 
     # --- Generate ---
+    n_batches = math.ceil(n_sequences / batch_size)
+    total = n_batches * batch_size
     sequences: list[str] = []
     scores: list[tuple[float, float]] = []
     all_debug_steps: list[list[dict]] = []
-    print(f"\nGenerating {n_sequences} sequence(s) ...")
-    for i in range(n_sequences):
-        seq, debug_steps = generate_one(
-            model=model,
-            tokenizer=tokenizer,
-            layer_module=layer_module,
-            hook_fn=hook_fn,
-            prefix=prefix,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=do_sample,
-            eos_token_id=eos_token_id,
-            device=device,
-            collect_debug=collect_debug,
-            vocab=vocab,
-        )
-        nll, ppl = score_sequence(model, tokenizer, seq, device)
-        sequences.append(seq)
-        scores.append((nll, ppl))
-        all_debug_steps.append(debug_steps)
-        print(f"  [{i+1}/{n_sequences}] len={len(seq)}  nll={nll:.2f}  ppl={ppl:.2f}  {seq[:60]}{'...' if len(seq) > 60 else ''}")
+    print(f"\nGenerating {total} sequence(s) ({n_batches} batch(es) of {batch_size}) ...")
+
+    for batch_idx in range(n_batches):
+        if batch_size > 1:
+            batch_seqs, batch_debug = generate_batch(
+                model=model,
+                tokenizer=tokenizer,
+                layer_module=layer_module,
+                hook_fn=hook_fn,
+                prefix=prefix,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                eos_token_id=eos_token_id,
+                device=device,
+                collect_debug=collect_debug,
+                vocab=vocab,
+            )
+        else:
+            seq, debug_steps = generate_one(
+                model=model,
+                tokenizer=tokenizer,
+                layer_module=layer_module,
+                hook_fn=hook_fn,
+                prefix=prefix,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                eos_token_id=eos_token_id,
+                device=device,
+                collect_debug=collect_debug,
+                vocab=vocab,
+            )
+            batch_seqs, batch_debug = [seq], [debug_steps]
+
+        for b, (seq, debug_steps) in enumerate(zip(batch_seqs, batch_debug)):
+            seq_idx = batch_idx * batch_size + b
+            nll, ppl = score_sequence(model, tokenizer, seq, device)
+            sequences.append(seq)
+            scores.append((nll, ppl))
+            all_debug_steps.append(debug_steps)
 
     # --- Write FASTA ---
-    clamp_tag = f"{clamp_value:.4f}{'_raw' if use_raw_clamp_values else '_norm'}"
+    suffix = "_raw" if use_raw_clamp_values else "_norm"
+    if not feat_clamp_pairs:
+        feat_header_tag = "no_feature"
+        feat_file_tag = "no_feature"
+        value_tag = f"{clamp_value:.4f}{suffix}"
+    elif len(feat_clamp_pairs) == 1:
+        fid, cv = feat_clamp_pairs[0]
+        feat_header_tag = f"feature_{fid}"
+        feat_file_tag = f"feature_{fid}"
+        value_tag = f"{cv:.4f}{suffix}"
+    else:
+        feat_header_tag = "features_" + "-".join(str(fid) for fid, _ in feat_clamp_pairs)
+        feat_file_tag = feat_header_tag
+        value_tag = "_".join(f"{fid}x{cv:.4f}" for fid, cv in feat_clamp_pairs) + suffix
+
     headers = [
-        f"steered_{i}|feature_{feature_id}|{mode}|{steering_method}|value_{clamp_tag}|nll={nll:.2f}|ppl={ppl:.2f}"
+        f"steered_{i}|{feat_header_tag}|{mode}|{steering_method}|value_{value_tag}|nll={nll:.2f}|ppl={ppl:.2f}"
         for i, (nll, ppl) in enumerate(scores)
     ]
+    if output_fasta is None:
+        if prefix:
+            if len(prefix) <= 8:
+                prefix_tag = f"_prefix_{prefix}"
+            else:
+                prefix_tag = f"_prefix_{prefix[:4]}..{prefix[-4:]}"
+        else:
+            prefix_tag = ""
+        fname = f"{feat_file_tag}_{mode}_{steering_method}_value_{value_tag}{prefix_tag}.fasta"
+        output_fasta = Path("steering_outputs") / fname
     write_fasta(sequences, headers, Path(output_fasta))
-    print(f"\nWrote {n_sequences} sequence(s) to {output_fasta}")
+    print(f"\nWrote {total} sequence(s) to {output_fasta}")
 
     # --- Build debug payload (shared by JSON writer and plotter) ---
     payload = None
@@ -612,11 +873,9 @@ def main(
         payload = {
             "meta": {
                 "sae_dir": str(sae_dir),
-                "feature_id": feature_id,
+                "features": [{"feature_id": fid, "clamp_value": cv} for fid, cv in feat_clamp_pairs],
                 "mode": mode,
                 "steering_method": steering_method,
-                "clamp_value": clamp_value,
-                "raw_steer_value": raw_steer_value,
             },
             "sequences": [
                 {
