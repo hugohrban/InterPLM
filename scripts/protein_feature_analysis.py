@@ -238,10 +238,10 @@ def _embed_progen2(
         # Guess the model name from the path (progen2_large → progen2-large)
         for part in reversed(Path(plm_embd_dir).parts):
             if "progen" in part.lower():
-                model_name = part.replace("_", "-")
+                model_name = "hugohrban/" + part.replace("_", "-")
                 break
         else:
-            model_name = "progen2-large"
+            model_name = "hugohrban/progen2-large"
 
         print(f"  Embedding with ProGen2 model={model_name} layer={layer} …")
         embedder = ProGen2(model_name, device=device)
