@@ -28,11 +28,13 @@ dms*
 *.cif
 *latest-run*
 *.full
-*.out
 *.DS_Store
 *analysis/*
 */data/*
 
+# Tool Logs
+*.targetp2
+*.out
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
