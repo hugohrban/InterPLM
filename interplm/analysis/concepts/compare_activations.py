@@ -291,6 +291,35 @@ def process_shard(
 
     all_features = list(range(n_features))
 
+    # ── DEBUG: verify activation distribution vs BatchTopK threshold ─────────
+    _btopk_threshold = getattr(sae, "threshold", None)
+    _rescale = getattr(sae, "activation_rescale_factor", None)
+    if _btopk_threshold is not None:
+        _thr_val = float(_btopk_threshold) if not hasattr(_btopk_threshold, "__len__") else float(_btopk_threshold.item())
+        print(f"\n[DEBUG] SAE learned threshold (BatchTopK scalar floor): {_thr_val:.4f}")
+        if _rescale is not None:
+            _rescale_cpu = _rescale.float().cpu()
+            _dead = (_rescale_cpu == 0).sum().item()
+            _r_f = torch.where(_rescale_cpu > 0, torch.tensor(_thr_val) / _rescale_cpu, torch.zeros_like(_rescale_cpu))
+            print(f"[DEBUG] activation_rescale_factor  min={_rescale_cpu.min():.4f}  "
+                  f"median={_rescale_cpu.median():.4f}  max={_rescale_cpu.max():.4f}  dead(=0)={_dead}")
+            print(f"[DEBUG] effective normalized floor r_f = threshold/rescale:  "
+                  f"min={_r_f.min():.4f}  median={_r_f.median():.4f}  max={_r_f[_rescale_cpu>0].max():.4f}")
+            _max_sweep = max(threshold_percents)
+            _collapsed = (_r_f > _max_sweep).sum().item()
+            print(f"[DEBUG] threshold_percents sweep = {threshold_percents}")
+            print(f"[DEBUG] Features where ALL sweep thresholds are equivalent "
+                  f"(r_f > max_sweep={_max_sweep}): {_collapsed}/{n_features} "
+                  f"({100*_collapsed/n_features:.1f}%)")
+            for t in threshold_percents:
+                n_degenerate = (_r_f > t).sum().item() - _dead
+                print(f"[DEBUG]   sweep threshold {t}: {n_degenerate}/{n_features-_dead} active features "
+                      f"already above this → no extra discrimination")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # DEBUG: sample first chunk to show raw activation stats
+    _debug_done = False
+
     with torch.no_grad():
         for start in range(0, n_tokens, token_chunk_size):
         # for start in tqdm(range(0, n_tokens, token_chunk_size), desc="Token chunks"):
@@ -306,6 +335,28 @@ def process_shard(
             sae_feats = sae.encode_feat_subset(
                 aa_chunk, all_features, normalize_features=True
             )  # (chunk, n_features)
+
+            # ── DEBUG: activation stats on the first chunk only ───────────────
+            if not _debug_done:
+                _debug_done = True
+                _nonzero_mask = sae_feats > 0
+                _n_nonzero = _nonzero_mask.sum().item()
+                _total = sae_feats.numel()
+                _nan_count = torch.isnan(sae_feats).sum().item()
+                print(f"\n[DEBUG] First chunk activations (post-normalize, chunk={aa_chunk.shape[0]} tokens):")
+                print(f"[DEBUG]   Non-zero values: {_n_nonzero}/{_total} ({100*_n_nonzero/_total:.2f}%)")
+                print(f"[DEBUG]   NaN values (dead features / 0-rescale): {_nan_count}")
+                if _n_nonzero > 0:
+                    _nonzero_vals = sae_feats[_nonzero_mask]
+                    print(f"[DEBUG]   Non-zero min={_nonzero_vals.min():.4f}  "
+                          f"median={_nonzero_vals.median():.4f}  "
+                          f"max={_nonzero_vals.max():.4f}  "
+                          f"mean={_nonzero_vals.mean():.4f}")
+                    print(f"[DEBUG]   Fraction of non-zero vals below each sweep threshold:")
+                    for t in threshold_percents:
+                        frac = (_nonzero_vals <= t).float().mean().item()
+                        print(f"[DEBUG]     <= {t}: {100*frac:.1f}% of non-zero activations would be binarized to 0")
+            # ─────────────────────────────────────────────────────────────────
 
             labels_bin_chunk = labels_binary[start:end]  # (chunk, n_concepts)
             labels_chunk = labels_gpu[start:end]          # (chunk, n_concepts)
