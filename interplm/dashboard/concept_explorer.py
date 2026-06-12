@@ -83,6 +83,20 @@ def render_concept_explorer(cache, layer_name: str, layer_data: dict) -> None:
         )
 
         has_gpu = torch.cuda.is_available()
+        max_examples_limit = 50 if has_gpu else 20
+        n_examples = st.number_input(
+            "Examples per feature",
+            min_value=1,
+            max_value=max_examples_limit,
+            value=5,
+            key="ce_n_examples",
+            help=(
+                "How many proteins to show per feature. "
+                f"Up to {max_examples_limit} available "
+                f"({'GPU detected' if has_gpu else 'no GPU — cached only'})."
+            ),
+        )
+
         can_run = bool(concept_query and sae_dir)
         run_btn = st.button(
             "Load / Run Analysis",
@@ -137,7 +151,7 @@ def render_concept_explorer(cache, layer_name: str, layer_data: dict) -> None:
     )
 
     if has_matching_results:
-        _render_results(st.session_state["ce_results"], layer_name, cache)
+        _render_results(st.session_state["ce_results"], layer_name, cache, int(n_examples))
     else:
         if sae_dir:
             _show_cached_analyses_main(Path(sae_dir))
@@ -252,7 +266,7 @@ def _load_or_compute(
 
 # ── Results rendering ─────────────────────────────────────────────────────────
 
-def _render_results(results: dict, layer_name: str, cache) -> None:
+def _render_results(results: dict, layer_name: str, cache, n_examples: int = 5) -> None:
     concept = results["concept"]
     mode = results["analysis_mode"]
     n_prot = results["n_proteins_with_concept"]
@@ -290,12 +304,12 @@ def _render_results(results: dict, layer_name: str, cache) -> None:
 
     for feat_idx, feat_data in enumerate(results["features"]):
         try:
-            _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept)
+            _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples)
         except Exception as e:
             st.error(f"Error rendering feature {feat_data.get('feature_id', '?')}: {e}")
 
 
-def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept):
+def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples: int = 5):
     feat_id = feat_data["feature_id"]
     ds = feat_data["discovery_stats"]
     agg = feat_data["aggregate_metrics"]
@@ -326,8 +340,8 @@ def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache
             st.session_state[f"feature_id_{layer_name}"] = feat_id
             st.rerun()
 
-        pos_examples = feat_data.get("positive_examples", [])
-        hi_examples = feat_data.get("high_activation_examples", [])
+        pos_examples = feat_data.get("positive_examples", [])[:n_examples]
+        hi_examples = feat_data.get("high_activation_examples", [])[:n_examples]
 
         # Gate: only render examples when the user has loaded them
         # (auto-load for the first feature since it's expanded by default)
@@ -380,13 +394,14 @@ def _render_example_protein(
     L = example["L"]
     feature_activations = np.array(example["feature_activations"], dtype=np.float32)
     annotation_indices = example.get("positive_residue_indices", [])
-    is_annotated = example.get("is_annotated", False)
+    # not used, for some this was not compputed properly but we can just use annotation indices being non-empty
+    # is_annotated = example.get("is_annotated", False)
     max_act = example.get("max_activation", float(feature_activations.max()))
     n_ann = example.get("n_annotated", len(annotation_indices))
     acts_at_sites = example.get("activations_at_annotation_sites", [])
     n_ovlp = sum(1 for v in acts_at_sites if v > 0.05) if acts_at_sites else 0
 
-    ann_tag = "**[ANN]**" if is_annotated else ""
+    ann_tag = "**[ANN]**" if annotation_indices else ""
     st.markdown(
         f"[{pid}](https://www.uniprot.org/uniprotkb/{pid}) {ann_tag} — "
         f"L={L}  max_act={max_act:.4f}  n_ann={n_ann}  n_ovlp(>0.05)={n_ovlp}"
@@ -400,42 +415,44 @@ def _render_example_protein(
     chart_key = f"chart_{feat_idx}_{section}_{ex_idx}_{pid}"
     struct_key = f"struct_{feat_idx}_{section}_{ex_idx}_{pid}"
 
-    # Activation chart — full width for readability
-    if st.session_state.get(chart_key, False):
-        fig = visualize_protein_feature(
-            feature_acts=feature_activations,
-            sequence=sequence,
-            metadata=None,
-            annotation_indices=annotation_indices if is_annotated else None,
-        )
-        st.plotly_chart(fig, width="stretch")
-    else:
-        img_bytes = _static_activation_image(
-            feature_activations,
-            tuple(annotation_indices) if is_annotated and annotation_indices else None,
-        )
-        st.image(img_bytes, width="stretch")
-        if st.button("Show interactive plot", key=f"btn_{chart_key}"):
-            st.session_state[chart_key] = True
-            st.rerun()
+    col_chart, col_struct = st.columns([4, 5])
 
-    # Structure: lazy — shown below the chart when loaded
-    if st.session_state.get(struct_key, False):
-        try:
-            structure_html = view_single_protein(
-                uniprot_id=pid,
-                values_to_color=normalized,
-                colormap_fn=colormap_fn,
-                residues_to_highlight=None,
-                pymol_params={"width": 900, "height": 350},
+    with col_chart:
+        if st.session_state.get(chart_key, False):
+            fig = visualize_protein_feature(
+                feature_acts=feature_activations,
+                sequence=sequence,
+                metadata=None,
+                annotation_indices=annotation_indices if annotation_indices else None,
             )
-            st.components.v1.html(structure_html, height=350)
-        except Exception:
-            st.caption("Structure not available.")
-    else:
-        if st.button("Load 3D structure", key=f"btn_{struct_key}"):
-            st.session_state[struct_key] = True
-            st.rerun()
+            st.plotly_chart(fig, width='stretch')
+        else:
+            img_bytes = _static_activation_image(
+                feature_activations,
+                tuple(annotation_indices) if annotation_indices else None,
+            )
+            st.image(img_bytes, width='stretch')
+            if st.button("Show interactive plot", key=f"btn_{chart_key}"):
+                st.session_state[chart_key] = True
+                st.rerun()
+
+    with col_struct:
+        if st.session_state.get(struct_key, False):
+            try:
+                structure_html = view_single_protein(
+                    uniprot_id=pid,
+                    values_to_color=normalized,
+                    colormap_fn=colormap_fn,
+                    residues_to_highlight=None,
+                    pymol_params={"width": 500, "height": 350},
+                )
+                st.components.v1.html(structure_html, height=350)
+            except Exception:
+                st.caption("Structure not available.")
+        else:
+            if st.button("Load 3D structure", key=f"btn_{struct_key}"):
+                st.session_state[struct_key] = True
+                st.rerun()
 
     st.divider()
 
@@ -455,7 +472,7 @@ def _static_activation_image(
     L = len(feature_activations)
     x = np.arange(L)
 
-    fig, ax = plt.subplots(figsize=(14, 3.0))
+    fig, ax = plt.subplots(figsize=(12, 7.0))
 
     # Green background spans at annotated positions (drawn first, behind bars)
     if annotation_indices:
