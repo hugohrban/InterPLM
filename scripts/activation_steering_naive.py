@@ -246,6 +246,7 @@ def generate_one(
     device: str,
     collect_debug: bool = False,
     vocab: Optional[dict] = None,
+    verbose: bool = False,
 ) -> tuple[str, list[dict]]:
     """
     Generate one sequence, optionally with a steering hook active throughout.
@@ -268,7 +269,7 @@ def generate_one(
     steered = layer_module is not None and hook_fn is not None
     handle = layer_module.register_forward_hook(hook_fn) if steered else None
     try:
-        with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False) as pbar:
+        with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False, disable=not verbose) as pbar:
             for step in range(max_new_tokens):
                 with torch.no_grad():
                     logits_steered = model(input_ids=ids).logits[0, -1]   # [vocab_size]
@@ -346,6 +347,7 @@ def generate_batch(
     device: str,
     collect_debug: bool = False,
     vocab: Optional[dict] = None,
+    verbose: bool = False,
 ) -> tuple[list[str], list[list[dict]]]:
     """
     Generate `batch_size` sequences in parallel, optionally with a steering hook.
@@ -368,7 +370,7 @@ def generate_batch(
     batch_debug: list[list[dict]] = [[] for _ in range(batch_size)]
 
     try:
-        with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False) as pbar:
+        with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False, disable=not verbose) as pbar:
             for step in range(max_new_tokens):
                 if finished.all():
                     break
@@ -656,6 +658,7 @@ def main(
     debug_output: Optional[Path] = None,
     plot_output: Optional[Path] = None,
     plot_max_steps: Optional[int] = None,
+    verbose: bool = False,
 ) -> None:
     """
     Generate protein sequences with SAE-guided activation steering.
@@ -809,6 +812,7 @@ def main(
                 device=device,
                 collect_debug=collect_debug,
                 vocab=vocab,
+                verbose=verbose,
             )
         else:
             seq, debug_steps = generate_one(
@@ -824,6 +828,7 @@ def main(
                 device=device,
                 collect_debug=collect_debug,
                 vocab=vocab,
+                verbose=verbose,
             )
             batch_seqs, batch_debug = [seq], [debug_steps]
 
