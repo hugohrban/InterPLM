@@ -8,14 +8,22 @@ This script calculates three key metrics:
 3. Downstream task fidelity (loss recovered on masked language modeling)
 
 Usage:
-    python examples/evaluate_sae.py \
-        --sae_path models/walkthrough_model/layer_4/ae.pt \
-        --fasta_file data/uniprot_shards/shard_0.fasta \
-        --model_name esm2_t6_8M_UR50D \
-        --layer 4 \
-        --output_file results/evaluation_metrics.yaml
+    # Single FASTA file
+    python scripts/evaluate_sae.py \
+        --sae_path trained_saes/pretrained_esm2-650M-layer24/ae_normalized.pt \
+        --fasta_file data/uniref50_subset500k_shards/test/shard_0.fasta \
+        --model_name esm2_t33_650M_UR50D \
+        --layer 24
+
+    # Directory of FASTA files (all *.fasta files are used)
+    python scripts/evaluate_sae.py \
+        --sae_path trained_saes/pretrained_esm2-650M-layer24/ae_normalized.pt \
+        --fasta_file data/uniref50_subset500k_shards/test \
+        --model_name esm2_t33_650M_UR50D \
+        --layer 24
 """
 
+import tempfile
 from pathlib import Path
 from typing import Optional
 import yaml
@@ -97,64 +105,52 @@ def calculate_sparsity_metrics(sae, embeddings):
     }
 
 
-def extract_embeddings_from_fasta(fasta_file, embedder, layer, max_proteins=None):
-    """Extract embeddings from a FASTA file.
+def extract_embeddings_from_fastas(fasta_files, embedder, layer, max_proteins=None):
+    """Extract embeddings from one or more FASTA files.
 
     Args:
-        fasta_file: Path to FASTA file
+        fasta_files: Single Path or list of Paths to FASTA files
         embedder: Protein embedder instance
         layer: Layer to extract
-        max_proteins: Maximum number of proteins to process (default: all)
+        max_proteins: Maximum total proteins to process (default: all)
 
     Returns:
         torch.Tensor: Concatenated embeddings [n_tokens, d_model]
     """
     from Bio import SeqIO
 
+    if isinstance(fasta_files, (str, Path)):
+        fasta_files = [Path(fasta_files)]
+
     all_embeddings = []
     n_proteins = 0
     n_skipped = 0
 
-    print(f"Extracting embeddings from {fasta_file}...")
+    for fasta_file in fasta_files:
+        if max_proteins is not None and n_proteins >= max_proteins:
+            break
 
-    # Count sequences first
-    with open(fasta_file) as f:
-        n_seqs = sum(1 for _ in SeqIO.parse(f, "fasta"))
+        with open(fasta_file) as f:
+            for record in SeqIO.parse(f, "fasta"):
+                if max_proteins is not None and n_proteins >= max_proteins:
+                    break
 
-    # Limit if requested
-    if max_proteins is not None:
-        n_seqs = min(n_seqs, max_proteins)
+                sequence = str(record.seq)
+                embeddings = embedder.embed_single_sequence(sequence, layer=layer)
 
-    with open(fasta_file) as f:
-        for record in tqdm(SeqIO.parse(f, "fasta"), total=n_seqs, desc="Processing proteins"):
-            sequence = str(record.seq)
+                if not isinstance(embeddings, torch.Tensor):
+                    embeddings = torch.from_numpy(embeddings)
 
-            # Get embeddings for this protein
-            embeddings = embedder.embed_single_sequence(
-                sequence,
-                layer=layer
-            )
+                if torch.isnan(embeddings).any():
+                    n_skipped += 1
+                    continue
 
-            # Convert to torch tensor if needed
-            if not isinstance(embeddings, torch.Tensor):
-                embeddings = torch.from_numpy(embeddings)
+                all_embeddings.append(embeddings)
+                n_proteins += 1
 
-            # Skip proteins with NaN embeddings (can happen with some ESM models/devices)
-            if torch.isnan(embeddings).any():
-                n_skipped += 1
-                continue
-
-            all_embeddings.append(embeddings)
-            n_proteins += 1
-
-            # Stop if we've reached max_proteins
-            if max_proteins is not None and n_proteins >= max_proteins:
-                break
-
-    # Concatenate all embeddings
     all_embeddings = torch.cat(all_embeddings, dim=0)
 
-    print(f"Extracted {all_embeddings.shape[0]:,} tokens from {n_proteins} proteins")
+    print(f"Extracted {all_embeddings.shape[0]:,} tokens from {n_proteins} proteins across {len(fasta_files)} file(s)")
     if n_skipped > 0:
         print(f"  (Skipped {n_skipped} proteins with NaN embeddings)")
 
@@ -177,7 +173,7 @@ def evaluate_sae(
 
     Args:
         sae_path: Path to SAE model (local path or hf://org/model:layer_N)
-        fasta_file: Path to FASTA file with evaluation sequences
+        fasta_file: Path to a FASTA file, or a directory containing *.fasta files
         model_name: ESM model name (e.g., esm2_t6_8M_UR50D)
         layer: Layer index to evaluate
         output_file: Path to save results (default: print to stdout)
@@ -186,15 +182,23 @@ def evaluate_sae(
         max_proteins: Maximum number of proteins to evaluate (default: all)
         device: Device for embedder (cpu/cuda/mps, default: auto-detect)
     """
-    # Validate inputs
-    if not fasta_file.exists():
-        raise FileNotFoundError(f"FASTA file not found: {fasta_file}")
+    # Resolve fasta_file to a list of paths
+    fasta_path = Path(fasta_file)
+    if fasta_path.is_dir():
+        fasta_files = sorted(fasta_path.glob("*.fasta"))
+        if not fasta_files:
+            raise FileNotFoundError(f"No .fasta files found in directory: {fasta_path}")
+        print(f"Found {len(fasta_files)} FASTA file(s) in {fasta_path}")
+    else:
+        if not fasta_path.exists():
+            raise FileNotFoundError(f"FASTA file not found: {fasta_path}")
+        fasta_files = [fasta_path]
 
     print("=" * 70)
     print("SAE Evaluation Script")
     print("=" * 70)
     print(f"SAE: {sae_path}")
-    print(f"FASTA: {fasta_file}")
+    print(f"FASTA: {fasta_file} ({len(fasta_files)} file(s))")
     print(f"Model: {model_name}")
     print(f"Layer: {layer}")
     print()
@@ -242,11 +246,11 @@ def evaluate_sae(
     print()
 
     # Extract embeddings
-    embeddings = extract_embeddings_from_fasta(
-        fasta_file,
+    embeddings = extract_embeddings_from_fastas(
+        fasta_files,
         embedder,
         layer,
-        max_proteins=max_proteins
+        max_proteins=max_proteins,
     )
 
     embeddings = embeddings.to(device_str)
@@ -254,7 +258,8 @@ def evaluate_sae(
     # Calculate metrics
     results = {
         "sae_path": str(sae_path),
-        "fasta_file": str(fasta_file),
+        "fasta_input": str(fasta_file),
+        "n_fasta_files": len(fasta_files),
         "model_name": model_name,
         "layer": layer,
         "n_tokens": embeddings.shape[0],
@@ -294,39 +299,52 @@ def evaluate_sae(
         print("masked tokens. Higher is better (100% = perfect preservation).")
         print()
 
-        # Create temporary file with sequences for fidelity eval
-        # import tempfile
-        # from Bio import SeqIO
+        from Bio import SeqIO
 
-        # with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        #     temp_seq_file = f.name
-        #     with open(fasta_file) as fasta_f:
-        #         for i, record in enumerate(SeqIO.parse(fasta_f, "fasta")):
-        #             if max_proteins is not None and i >= max_proteins:
-        #                 break
-        #             f.write(str(record.seq) + "\n")
+        # Fidelity needs a single sequence file. Write a temp combined FASTA
+        # when the input is a directory, reuse the file directly otherwise.
+        _tmp_fasta = None
+        if len(fasta_files) == 1:
+            fidelity_seq_path = fasta_files[0]
+        else:
+            _tmp_fasta = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".fasta", delete=False
+            )
+            n_written = 0
+            for fasta_f in fasta_files:
+                for record in SeqIO.parse(fasta_f, "fasta"):
+                    if max_proteins is not None and n_written >= max_proteins:
+                        break
+                    _tmp_fasta.write(f">{record.id}\n{record.seq}\n")
+                    n_written += 1
+                if max_proteins is not None and n_written >= max_proteins:
+                    break
+            _tmp_fasta.close()
+            fidelity_seq_path = Path(_tmp_fasta.name)
+            print(f"  Combined {n_written} sequences into temp file for fidelity")
 
-        # try:
-        fidelity_config_cls = ESMFidelityConfig if embedder_type == "esm" else ProGenFidelityConfig
-        fidelity_config = fidelity_config_cls(
-            eval_seq_path=fasta_file,
-            model_name=model_name,
-            layer_idx=layer,
-            eval_batch_size=fidelity_batch_size,
-        )
+        try:
+            fidelity_config_cls = ESMFidelityConfig if embedder_type == "esm" else ProGenFidelityConfig
+            fidelity_config = fidelity_config_cls(
+                eval_seq_path=fidelity_seq_path,
+                model_name=model_name,
+                layer_idx=layer,
+                eval_batch_size=fidelity_batch_size,
+            )
 
-        fidelity_eval = fidelity_config.build()
-        fidelity_metrics = fidelity_eval._calculate_fidelity(sae)
-        results["fidelity"] = fidelity_metrics
+            fidelity_eval = fidelity_config.build()
+            fidelity_metrics = fidelity_eval._calculate_fidelity(sae)
+            results["fidelity"] = fidelity_metrics
 
-        for key, value in fidelity_metrics.items():
-            if "pct" in key:
-                print(f"  {key}: {value:.2f}%")
-            else:
-                print(f"  {key}: {value:.6f}")
-        # finally:
-        #     import os
-        #     os.unlink(temp_seq_file)
+            for key, value in fidelity_metrics.items():
+                if "pct" in key:
+                    print(f"  {key}: {value:.2f}%")
+                else:
+                    print(f"  {key}: {value:.6f}")
+        finally:
+            if _tmp_fasta is not None:
+                import os
+                os.unlink(_tmp_fasta.name)
     else:
         print("\n(Skipping fidelity evaluation)")
 

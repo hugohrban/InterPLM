@@ -214,7 +214,12 @@ class ESMFidelityFunction(EvaluationManager):
 
         # Load evaluation sequences
         eval_seq_content = Path(self.eval_seq_path).read_text()
-        eval_seqs = [line.strip() for line in eval_seq_content.splitlines() if line.strip()]
+        eval_seq_path_suffix = Path(self.eval_seq_path).suffix
+        if eval_seq_path_suffix in [".fasta", ".fa"]:
+            from Bio import SeqIO
+            eval_seqs = [str(r.seq).strip() for r in SeqIO.parse(self.eval_seq_path, "fasta") if r.seq]
+        else:
+            eval_seqs = [line.strip() for line in eval_seq_content.splitlines() if line.strip()]
 
         # Prepare data in the format expected by the batch converter
         data = [(f"protein{i}", seq) for i, seq in enumerate(eval_seqs)]
