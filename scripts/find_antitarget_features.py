@@ -16,6 +16,14 @@ Usage (ps_scan mode):
         --ps_scan steering_experiments/sushi/combo_r1.pff \
         --sae_dir trained_saes/best_progen_large_24 \
         --top_k 20
+
+Usage (SignalP6 mode):
+    python scripts/find_antitarget_features.py \
+        --fasta signal_steering_outputs/run1.fasta \
+        --signalp6 signal_steering_outputs/signalp_outputs/run1/prediction_results.txt \
+        --sae_dir trained_saes/best_progen_large_24 \
+        --top_k 20
+    # By default counts SP(Sec/SPI) as positive. Use --signalp6_classes SP,TAT,LIPO to include others.
 """
 
 import re
@@ -61,6 +69,23 @@ def parse_targetp(path: str) -> dict[str, str]:
             seq_id = parts[0]
             pred = parts[1]
             labels[seq_id] = pred
+    return labels
+
+
+def parse_signalp6(path: str) -> dict[str, str]:
+    """Returns {seq_id: prediction} from SignalP6 prediction_results.txt.
+    Prediction is one of: SP, LIPO, TAT, TATLIPO, PILIN, OTHER.
+    """
+    labels = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            labels[parts[0]] = parts[1]
     return labels
 
 
@@ -130,6 +155,8 @@ def find_antitarget_features(
     fasta: str,
     targetp: Optional[str] = None,
     ps_scan: Optional[str] = None,
+    signalp6: Optional[str] = None,
+    signalp6_classes: str = "SP",
     sae_dir: str = "trained_saes/best_progen_large_24",
     top_k: int = 30,
     stat: str = "max",
@@ -142,21 +169,25 @@ def find_antitarget_features(
     Main analysis: identify features enriched in positive vs negative sequences.
 
     Args:
-        fasta:            Path to FASTA file from steering experiment
-        targetp:          Path to TargetP2 output (use this OR --ps_scan)
-        ps_scan:          Path to ps_scan PFF output (use this OR --targetp)
-        sae_dir:          Path to SAE directory
-        top_k:            Number of top anti-features to report
-        stat:             'max' or 'mean' per-sequence SAE feature statistic
-        min_tp:           Minimum positive sequences required to run analysis
-        device:           CUDA device
-        layer:            Override layer index (reads from config.yaml if None)
-        steered_features: Feature IDs to report in summary section (default: [5900, 3884, 7356])
+        fasta:             Path to FASTA file from steering experiment
+        targetp:           Path to TargetP2 output (use this OR --ps_scan OR --signalp6)
+        ps_scan:           Path to ps_scan PFF output (use this OR --targetp OR --signalp6)
+        signalp6:          Path to SignalP6 prediction_results.txt (use this OR --targetp OR --ps_scan)
+        signalp6_classes:  Comma-separated SignalP6 prediction classes to count as positive.
+                           Default 'SP' (Sec/SPI only). Use 'SP,TAT,LIPO' to include others.
+        sae_dir:           Path to SAE directory
+        top_k:             Number of top anti-features to report
+        stat:              'max' or 'mean' per-sequence SAE feature statistic
+        min_tp:            Minimum positive sequences required to run analysis
+        device:            CUDA device
+        layer:             Override layer index (reads from config.yaml if None)
+        steered_features:  Feature IDs to report in summary section (default: [5900, 3884, 7356])
     """
-    if targetp is None and ps_scan is None:
-        raise ValueError("Provide either --targetp or --ps_scan")
-    if targetp is not None and ps_scan is not None:
-        raise ValueError("Provide either --targetp or --ps_scan, not both")
+    n_sources = sum(x is not None for x in [targetp, ps_scan, signalp6])
+    if n_sources == 0:
+        raise ValueError("Provide one of --targetp, --ps_scan, or --signalp6")
+    if n_sources > 1:
+        raise ValueError("Provide only one of --targetp, --ps_scan, or --signalp6")
 
     sae_dir = Path(sae_dir)
 
@@ -172,6 +203,27 @@ def find_antitarget_features(
             else:
                 notp_seqs.append(seq)
         label_source = f"ps_scan ({len(matched_ids)} matched IDs)"
+    elif signalp6 is not None:
+        positive_classes = [c.strip().upper() for c in signalp6_classes.split(",")]
+        print(f"Parsing FASTA and SignalP6 output (positive classes: {positive_classes})...")
+        seqs = parse_fasta(fasta)
+        labels = parse_signalp6(signalp6)
+        # Print per-class breakdown
+        from collections import Counter
+        class_counts: Counter = Counter()
+        for header, _ in seqs:
+            class_counts[labels.get(header, "OTHER")] += 1
+        print("  SignalP6 class breakdown:")
+        for cls, cnt in sorted(class_counts.items(), key=lambda x: -x[1]):
+            print(f"    {cls}: {cnt} ({cnt/len(seqs):.1%})")
+        tp_seqs, notp_seqs = [], []
+        for header, seq in seqs:
+            pred = labels.get(header, "OTHER")
+            if pred in positive_classes:
+                tp_seqs.append(seq)
+            else:
+                notp_seqs.append(seq)
+        label_source = f"SignalP6 ({'+'.join(positive_classes)} as positive)"
     else:
         print("Parsing FASTA and TargetP outputs...")
         seqs = parse_fasta(fasta)
