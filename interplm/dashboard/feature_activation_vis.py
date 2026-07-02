@@ -9,6 +9,20 @@ from plotly.subplots import make_subplots
 PINK_SHADE = "#cc39ca"
 CYAN_SHADE = "#00DDFF"
 
+# Dark-surface categorical palette, fixed order (see dataviz skill palette.md).
+# Capped at 8 — beyond that, colors stop being distinguishable at a glance.
+FEATURE_COLOR_SEQUENCE = [
+    "#3987e5",  # blue
+    "#199e70",  # aqua
+    "#c98500",  # yellow
+    "#008300",  # green
+    "#9085e9",  # violet
+    "#e66767",  # red
+    "#d55181",  # magenta
+    "#d95926",  # orange
+]
+MAX_ZOOM_FEATURES = len(FEATURE_COLOR_SEQUENCE)
+
 
 def generate_color_palette(unique_tokens):
     n_colors = len(unique_tokens)
@@ -96,6 +110,165 @@ def visualize_protein_feature(
                     line_width=0,
                     layer="below",
                 )
+
+    return fig
+
+
+def _merge_contiguous_ranges(indices):
+    """Collapse a sorted list of residue indices into (start, end) inclusive runs."""
+    if not indices:
+        return []
+    ranges = []
+    start = prev = indices[0]
+    for idx in indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        ranges.append((start, prev))
+        start = prev = idx
+    ranges.append((start, prev))
+    return ranges
+
+
+def _add_annotation_shading(fig, annotation_indices, sequence_len, **vrect_kwargs):
+    if not annotation_indices:
+        return
+    clean = sorted(i for i in annotation_indices if 0 <= i < sequence_len)
+    for start, end in _merge_contiguous_ranges(clean):
+        fig.add_vrect(
+            x0=start - 0.5,
+            x1=end + 0.5,
+            fillcolor="rgba(0, 200, 100, 0.25)",
+            line_width=0,
+            layer="below",
+            **vrect_kwargs,
+        )
+
+
+def visualize_multi_feature_activations(
+    feature_acts: dict,
+    annotation_indices=None,
+    mode: str = "stacked",
+    sequence: str = None,
+):
+    """
+    Compare several SAE features' activation profiles on a single protein.
+
+    Args:
+        feature_acts: {feature_id: (L,) array-like of activations}, in display order.
+                       Capped at MAX_ZOOM_FEATURES entries (categorical palette limit).
+        annotation_indices: residue indices annotated for the concept being zoomed into
+        mode: "overlay" (single axes, one line per feature) or
+              "stacked" (one row per feature, shared x-axis)
+        sequence: amino-acid one-letter sequence, len == L; shown in hover text if given
+
+    Returns:
+        plotly Figure
+    """
+    feature_ids = list(feature_acts.keys())[:MAX_ZOOM_FEATURES]
+    arrays = {
+        fid: (acts.detach().cpu().numpy() if hasattr(acts, "detach") else np.asarray(acts))
+        for fid, acts in ((f, feature_acts[f]) for f in feature_ids)
+    }
+    L = len(next(iter(arrays.values())))
+    positions = list(range(L))
+    colors = dict(zip(feature_ids, FEATURE_COLOR_SEQUENCE))
+
+    has_seq = bool(sequence) and len(sequence) == L
+    customdata = list(sequence) if has_seq else None
+    hover_pos = "%{customdata}%{x}" if has_seq else "pos %{x}"
+    seq_xaxis_kwargs = (
+        dict(
+            tickmode="array",
+            tickvals=positions,
+            ticktext=list(sequence),
+            tickfont=dict(family="monospace", size=10),
+            tickangle=0,
+        )
+        if has_seq
+        else {}
+    )
+
+    if mode == "stacked":
+        fig = make_subplots(
+            rows=len(feature_ids),
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.06 if len(feature_ids) <= 5 else 0.03,
+        )
+        for row, fid in enumerate(feature_ids, start=1):
+            acts = arrays[fid]
+            fig.add_trace(
+                go.Bar(
+                    x=positions,
+                    y=acts,
+                    customdata=customdata,
+                    marker=dict(color=colors[fid], line_width=0),
+                    showlegend=False,
+                    hovertemplate=hover_pos + ": %{y:.3f}<extra>f/" + str(fid) + "</extra>",
+                ),
+                row=row,
+                col=1,
+            )
+            _add_annotation_shading(fig, annotation_indices, L, row=row, col=1)
+            fig.update_yaxes(
+                range=[0, 1],
+                showgrid=False,
+                zeroline=False,
+                automargin=True,
+                title=dict(text=f"f/{fid}", font=dict(size=12), standoff=4),
+                row=row,
+                col=1,
+            )
+
+        fig.update_xaxes(
+            showgrid=False, zeroline=False, row=len(feature_ids), col=1, **seq_xaxis_kwargs
+        )
+        fig.update_layout(
+            height=140 * len(feature_ids),
+            bargap=0,
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=40, r=0, t=10, b=20 if has_seq else 0),
+        )
+
+    else:  # overlay
+        fig = go.Figure()
+        for fid in feature_ids:
+            acts = arrays[fid]
+            fig.add_trace(
+                go.Bar(
+                    x=positions,
+                    y=acts,
+                    name=f"f/{fid}",
+                    customdata=customdata,
+                    marker=dict(color=colors[fid], opacity=0.6, line_width=0),
+                    hovertemplate=hover_pos + ": %{y:.3f}<extra>f/" + str(fid) + "</extra>",
+                )
+            )
+        _add_annotation_shading(fig, annotation_indices, L)
+        fig.update_layout(
+            barmode="overlay",
+            bargap=0,
+            xaxis_title="Sequence" if has_seq else "Sequence Position",
+            yaxis_title="Feature Activation",
+            height=350,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                bgcolor="rgba(0,0,0,0)",
+                bordercolor="rgba(128,128,128,0.3)",
+            ),
+            margin=dict(l=0, r=0, t=30, b=20 if has_seq else 0),
+        )
+        fig.update_xaxes(showgrid=False, zeroline=False, **seq_xaxis_kwargs)
+        fig.update_yaxes(range=[0, 1], showgrid=False, zeroline=False)
 
     return fig
 

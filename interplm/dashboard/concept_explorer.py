@@ -21,16 +21,20 @@ import torch
 
 from interplm.analysis.concepts.compare_activations import load_concept_names
 from interplm.analysis.concepts.rank_eval import (
-    compute_annotation_enrichment,
     concept_to_filename,
+    get_or_build_enrichment_cache,
     get_top_features_for_concept,
     load_results,
+    query_enrichment_cache,
     run_rank_eval_for_concept,
     save_results,
     search_concepts,
 )
 from interplm.dashboard.colors import get_structure_palette_and_colormap
-from interplm.dashboard.feature_activation_vis import visualize_protein_feature
+from interplm.dashboard.feature_activation_vis import (
+    MAX_ZOOM_FEATURES,
+    visualize_protein_feature,
+)
 from interplm.dashboard.view_structures import view_single_protein
 
 _DEFAULT_ANNOT_DIR = "data/annotations/uniprotkb/processed"
@@ -83,18 +87,13 @@ def render_concept_explorer(cache, layer_name: str, layer_data: dict) -> None:
         )
 
         has_gpu = torch.cuda.is_available()
-        max_examples_limit = 50 if has_gpu else 20
         n_examples = st.number_input(
-            "Examples per feature",
+            "Examples per feature (k)",
             min_value=1,
-            max_value=max_examples_limit,
-            value=5,
+            max_value=20,
+            value=10,
             key="ce_n_examples",
-            help=(
-                "How many proteins to show per feature. "
-                f"Up to {max_examples_limit} available "
-                f"({'GPU detected' if has_gpu else 'no GPU — cached only'})."
-            ),
+            help="How many proteins to load per feature, per section (max 20).",
         )
 
         can_run = bool(concept_query and sae_dir)
@@ -132,6 +131,7 @@ def render_concept_explorer(cache, layer_name: str, layer_data: dict) -> None:
             mode=mode,
             top_k=int(top_k),
             has_gpu=has_gpu,
+            n_examples=int(n_examples),
         )
         if err:
             st.error(err)
@@ -173,6 +173,7 @@ def _load_or_compute(
     mode: str,
     top_k: int,
     has_gpu: bool,
+    n_examples: int = 10,
     split: str = "test",
 ):
     """Return (results_dict, error_str). Exactly one of them is None."""
@@ -233,16 +234,22 @@ def _load_or_compute(
         )
         features_df = get_top_features_for_concept(concept_name, f1_df, top_k=top_k)
     else:
-        with st.status("Running annotation enrichment…", expanded=True):
-            features_df = compute_annotation_enrichment(
-                raw_concept_col=raw_concept_col,
+        model_name = "ae_normalized.pt" if (sae_dir / "ae_normalized.pt").exists() else "ae.pt"
+        with st.status("Loading enrichment cache (building if needed)…", expanded=True):
+            cache = get_or_build_enrichment_cache(
                 sae=sae,
                 embed_dir=embed_dir,
                 annot_dir=annot_dir,
                 shards=shards,
-                top_k_features=top_k,
+                sae_dir=sae_dir,
                 device=device,
                 chunk_size=2048,
+                sae_model_name=model_name,
+            )
+            features_df = query_enrichment_cache(
+                raw_concept_col=raw_concept_col,
+                cache=cache,
+                top_k_features=top_k,
             )
 
     with st.status("Running per-protein rank evaluation…", expanded=True):
@@ -256,6 +263,7 @@ def _load_or_compute(
             annot_dir=annot_dir,
             keep_idx=keep_idx,
             shards=shards,
+            n_examples=n_examples,
             device=device,
             chunk_size=32768,
         )
@@ -266,7 +274,7 @@ def _load_or_compute(
 
 # ── Results rendering ─────────────────────────────────────────────────────────
 
-def _render_results(results: dict, layer_name: str, cache, n_examples: int = 5) -> None:
+def _render_results(results: dict, layer_name: str, cache, n_examples: int = 10) -> None:
     concept = results["concept"]
     mode = results["analysis_mode"]
     n_prot = results["n_proteins_with_concept"]
@@ -298,18 +306,42 @@ def _render_results(results: dict, layer_name: str, cache, n_examples: int = 5) 
         })
 
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    feat_ids_all = [f["feature_id"] for f in results["features"]]
+    if st.button("🔍 Open in Protein Zoom (this concept's features)", key="ce_open_zoom_page"):
+        _goto_protein_zoom(feat_ids_all, concept)
+
     st.markdown("---")
 
     colormap_fn, _ = get_structure_palette_and_colormap((0, 0.4, 0.85))
 
     for feat_idx, feat_data in enumerate(results["features"]):
         try:
-            _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples)
+            _render_feature_expander(
+                feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples, feat_ids_all
+            )
         except Exception as e:
             st.error(f"Error rendering feature {feat_data.get('feature_id', '?')}: {e}")
 
 
-def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples: int = 5):
+# ── Protein Zoom hand-off ────────────────────────────────────────────────────
+
+def _goto_protein_zoom(feature_ids: List[int], concept_name: str, protein_id: str = "") -> None:
+    """Pre-fill the Protein Zoom page and switch to it."""
+    feature_ids = feature_ids[:MAX_ZOOM_FEATURES]
+    st.session_state["pz_protein_id"] = protein_id
+    st.session_state["pz_feature_ids_text"] = ", ".join(str(f) for f in feature_ids)
+    st.session_state["pz_concept_query"] = concept_name
+    st.session_state.pop("pz_result", None)
+    st.session_state.pop("pz_result_key", None)
+    st.session_state["_pending_dashboard_mode"] = "Protein Zoom"
+    st.rerun()
+
+
+def _render_feature_expander(
+    feat_data, feat_idx, layer_name, colormap_fn, cache, concept, n_examples: int = 10,
+    feat_ids_all: Optional[List[int]] = None,
+):
     feat_id = feat_data["feature_id"]
     ds = feat_data["discovery_stats"]
     agg = feat_data["aggregate_metrics"]
@@ -336,7 +368,7 @@ def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache
             f"Open f/{feat_id} in Feature Explorer",
             key=f"goto_{feat_idx}_{feat_id}",
         ):
-            st.session_state["dashboard_mode"] = "Feature Explorer"
+            st.session_state["_pending_dashboard_mode"] = "Feature Explorer"
             st.session_state[f"feature_id_{layer_name}"] = feat_id
             st.rerun()
 
@@ -350,7 +382,7 @@ def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache
 
         if not examples_loaded:
             if st.button(
-                f"Load {len(pos_examples) + len(hi_examples)} protein examples",
+                f"Load {n_examples} protein examples",
                 key=f"load_btn_{feat_idx}",
             ):
                 st.session_state[load_key] = True
@@ -371,14 +403,18 @@ def _render_feature_expander(feat_data, feat_idx, layer_name, colormap_fn, cache
                 f"activates at the binding site residues · {len(pos_examples)} shown"
             )
             for ex_idx, ex in enumerate(pos_examples):
-                _render_example_protein(ex, feat_id, feat_idx, "pos", ex_idx, colormap_fn, cache)
+                _render_example_protein(
+                    ex, feat_id, feat_idx, "pos", ex_idx, colormap_fn, cache, concept, feat_ids_all
+                )
         else:
             st.caption(
                 f"Proteins with the strongest overall activation — includes unannotated "
                 f"proteins that may have missing annotations · {len(hi_examples)} shown"
             )
             for ex_idx, ex in enumerate(hi_examples):
-                _render_example_protein(ex, feat_id, feat_idx, "hi", ex_idx, colormap_fn, cache)
+                _render_example_protein(
+                    ex, feat_id, feat_idx, "hi", ex_idx, colormap_fn, cache, concept, feat_ids_all
+                )
 
 
 def _render_example_protein(
@@ -389,6 +425,8 @@ def _render_example_protein(
     ex_idx: int,
     colormap_fn,
     cache,
+    concept: str = "",
+    feat_ids_all: Optional[List[int]] = None,
 ) -> None:
     pid = example["protein_id"]
     L = example["L"]
@@ -402,10 +440,15 @@ def _render_example_protein(
     n_ovlp = sum(1 for v in acts_at_sites if v > 0.05) if acts_at_sites else 0
 
     ann_tag = "**[ANN]**" if annotation_indices else ""
-    st.markdown(
-        f"[{pid}](https://www.uniprot.org/uniprotkb/{pid}) {ann_tag} — "
-        f"L={L}  max_act={max_act:.4f}  n_ann={n_ann}  n_ovlp(>0.05)={n_ovlp}"
-    )
+    col_label, col_zoom = st.columns([6, 1])
+    with col_label:
+        st.markdown(
+            f"[{pid}](https://www.uniprot.org/uniprotkb/{pid}) {ann_tag} — "
+            f"L={L}  max_act={max_act:.4f}  n_ann={n_ann}  n_ovlp(>0.05)={n_ovlp}"
+        )
+    with col_zoom:
+        if st.button("🔍 Zoom in", key=f"zoom_{feat_idx}_{section}_{ex_idx}_{pid}"):
+            _goto_protein_zoom(feat_ids_all or [feat_id], concept, pid)
 
     sequence = _get_sequence(pid, L, cache)
 
@@ -419,6 +462,9 @@ def _render_example_protein(
 
     with col_chart:
         if st.session_state.get(chart_key, False):
+            if st.button("Hide interactive plot", key=f"btn_hide_{chart_key}"):
+                st.session_state[chart_key] = False
+                st.rerun()
             fig = visualize_protein_feature(
                 feature_acts=feature_activations,
                 sequence=sequence,
@@ -438,6 +484,9 @@ def _render_example_protein(
 
     with col_struct:
         if st.session_state.get(struct_key, False):
+            if st.button("Hide 3D structure", key=f"btn_hide_{struct_key}"):
+                st.session_state[struct_key] = False
+                st.rerun()
             try:
                 structure_html = view_single_protein(
                     uniprot_id=pid,

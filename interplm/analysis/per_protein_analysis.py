@@ -424,6 +424,37 @@ def build_annotation_shard_index(annot_dir: Path) -> Dict[str, Tuple[int, int, i
     return mapping
 
 
+# ─── Single-concept annotation lookup ─────────────────────────────────────────
+
+def get_annotation_indices_for_concept(
+    protein_id: str,
+    annot_dir: Path,
+    raw_concept_col: int,
+) -> List[int]:
+    """
+    Return residue indices annotated for one concept (raw annotation column) in one protein.
+
+    Looks up the protein independently in the annotation shards (protein_data.tsv),
+    so it works for any protein_id, not just ones already present in a rank-eval
+    result's stored examples. Returns [] if the protein has no annotation shard entry.
+    """
+    annot_dir = Path(annot_dir)
+    annot_index = build_annotation_shard_index(annot_dir)
+    pid_upper = protein_id.upper()
+
+    if pid_upper not in annot_index:
+        return []
+
+    shard_idx, row_start, row_end = annot_index[pid_upper]
+    annot_path = annot_dir / f"shard_{shard_idx}" / "aa_concepts.npz"
+    if not annot_path.exists():
+        return []
+
+    labels_sparse = load_npz(annot_path)
+    col = labels_sparse[row_start:row_end, raw_concept_col].toarray().ravel()
+    return np.nonzero(col > 0)[0].tolist()
+
+
 # ─── Annotation overlap ───────────────────────────────────────────────────────
 
 def get_annotation_overlap(

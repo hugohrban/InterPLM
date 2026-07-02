@@ -14,6 +14,7 @@ import torch
 
 from interplm.dashboard.colors import get_structure_palette_and_colormap
 from interplm.dashboard.concept_explorer import render_concept_explorer
+from interplm.dashboard.protein_zoom import render_protein_zoom
 from interplm.dashboard.feature_activation_vis import (
     plot_activation_scatter,
     plot_activations_for_single_feat,
@@ -872,7 +873,7 @@ class ProteinFeatureVisualizer:
 def main(cache_dir: str):
     st.set_page_config(
         layout="wide",
-        page_title="InterPLM",
+        page_title=Path(cache_dir).name,
         page_icon="🧬",
     )
 
@@ -896,10 +897,16 @@ def main(cache_dir: str):
 
     visualizer = ProteinFeatureVisualizer(cache_dir=Path(cache_dir))
 
+    # Cross-page navigation (e.g. "Zoom in" / "Open in Feature Explorer" buttons) must
+    # set this before the `dashboard_mode` widget below is instantiated on the next run —
+    # Streamlit forbids writing to a widget's session_state key after it's been created.
+    if "_pending_dashboard_mode" in st.session_state:
+        st.session_state["dashboard_mode"] = st.session_state.pop("_pending_dashboard_mode")
+
     st.sidebar.markdown(help_notes["overall"], unsafe_allow_html=True)
     dashboard_mode = st.sidebar.radio(
         "View mode",
-        ["Feature Explorer", "Concept Explorer"],
+        ["Feature Explorer", "Concept Explorer", "Protein Zoom"],
         key="dashboard_mode",
     )
     st.sidebar.markdown("---")
@@ -920,7 +927,10 @@ def main(cache_dir: str):
                 key="ce_layer_select",
             )
         layer_data = visualizer.dashboard_data.data[layer]
-        render_concept_explorer(visualizer.dashboard_data, layer, layer_data)
+        if dashboard_mode == "Concept Explorer":
+            render_concept_explorer(visualizer.dashboard_data, layer, layer_data)
+        else:
+            render_protein_zoom(visualizer.dashboard_data, layer, layer_data)
 
 
 if __name__ == "__main__":
