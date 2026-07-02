@@ -1,5 +1,10 @@
 # Data
 data/
+thesis-tex/
+signal_steering_outputs/
+steering_experiments/
+steering_outputs/
+concept_anal_outputs/
 
 # Models
 models/
