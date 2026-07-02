@@ -22,10 +22,12 @@ import pandas as pd
 
 from interplm.analysis.concepts.compare_activations import load_concept_names
 from interplm.analysis.concepts.rank_eval import (
-    compute_annotation_enrichment,
+    augment_with_f1,
     concept_to_filename,
+    get_or_build_enrichment_cache,
     get_top_features_for_concept,
     load_results,
+    query_enrichment_cache,
     run_rank_eval_for_concept,
     save_results,
     search_concepts,
@@ -152,24 +154,33 @@ def rank_eval_concepts(
             )
 
     else:  # annotation_enrichment
-        print(f"Running annotation enrichment (full SAE forward, chunk={chunk_size_enrich}) ...")
-        enrich_df = compute_annotation_enrichment(
-            raw_concept_col=raw_concept_col,
+        cache = get_or_build_enrichment_cache(
             sae=sae,
             embed_dir=embed_dir,
             annot_dir=annot_dir,
             shards=shards,
-            top_k_features=top_k_features,
+            sae_dir=sae_dir,
             device=device,
             chunk_size=chunk_size_enrich,
+            sae_model_name=model_name,
         )
-        features_df = enrich_df
+        enrich_df = query_enrichment_cache(
+            raw_concept_col=raw_concept_col,
+            cache=cache,
+            top_k_features=top_k_features,
+        )
+        f1_csv = sae_dir / f"results_{split}_counts" / "concept_f1_scores.csv"
+        features_df = augment_with_f1(enrich_df, concept_name, f1_csv)
         print(f"Top {len(features_df)} features by enrichment ratio:")
         for _, r in features_df.iterrows():
+            f1_str = ""
+            if "f1_per_domain" in r.index and pd.notna(r.get("f1_per_domain")):
+                f1_str = f"  f1={r.f1:.4f}  f1d={r.f1_per_domain:.4f}  prec={r.precision:.4f}"
             print(
                 f"  feature {int(r.feature):6d}  enrichment={r.enrichment_ratio:.2f}x"
                 f"  mean_at_concept={r.mean_act_at_concept:.4f}"
                 f"  mean_at_bg={r.mean_act_at_background:.4f}"
+                f"{f1_str}"
             )
 
     print()
@@ -226,9 +237,13 @@ def _print_summary(results: dict) -> None:
                 f"  tp={ds['tp']}]  n_proteins={n}"
             )
         else:
+            f1_str = ""
+            if "f1_per_domain" in ds:
+                f1_str = f"  f1={ds['f1']:.4f}  f1d={ds['f1_per_domain']:.4f}  prec={ds['precision']:.4f}"
             print(
                 f"Feature {feat_id}  [enrichment={ds['enrichment_ratio']:.2f}x"
-                f"  mean_concept={ds['mean_act_at_concept']:.4f}]  n_proteins={n}"
+                f"  mean_concept={ds['mean_act_at_concept']:.4f}"
+                f"{f1_str}]  n_proteins={n}"
             )
 
         if n == 0:

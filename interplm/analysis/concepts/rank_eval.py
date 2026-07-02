@@ -77,9 +77,18 @@ def _per_protein_metrics(
 # ─── Concept search ───────────────────────────────────────────────────────────
 
 def search_concepts(query: str, concept_names: List[str]) -> List[Tuple[int, str]]:
-    """Case-insensitive substring match. Returns [(filt_idx, name), ...]."""
+    """Case-insensitive substring match. Returns [(filt_idx, name), ...].
+    If the query exactly matches one concept name, returns only that one."""
     q = query.lower()
-    return [(i, name) for i, name in enumerate(concept_names) if q in name.lower()]
+    exact = None
+    matches = []
+    for i, name in enumerate(concept_names):
+        nl = name.lower()
+        if q == nl:
+            exact = [(i, name)]
+        elif q in nl:
+            matches.append((i, name))
+    return exact if exact else matches
 
 
 # ─── Mode 1: F1-guided feature discovery ─────────────────────────────────────
@@ -102,47 +111,54 @@ def get_top_features_for_concept(
     return df.head(top_k).reset_index(drop=True)
 
 
-# ─── Mode 2: Annotation enrichment ───────────────────────────────────────────
+# ─── Mode 2: Annotation enrichment (precomputed cache) ────────────────────────
 
-def compute_annotation_enrichment(
-    raw_concept_col: int,
+def precompute_enrichment_cache(
     sae,
     embed_dir: Path,
     annot_dir: Path,
     shards: List[int],
-    top_k_features: int = 20,
+    cache_path: Path,
     device: str = "cuda:0",
     chunk_size: int = 2048,
-) -> pd.DataFrame:
+    sae_model_name: str = "ae_normalized.pt",
+) -> Path:
     """
-    Find SAE features that consistently activate at annotated residue positions.
+    One-pass precomputation of per-concept, per-feature activation statistics.
 
-    Performs a single pass over shards, accumulating mean feature activation at
-    concept-annotated residues vs. background.  Returns top features by enrichment
-    ratio (mean_at_concept / mean_at_background), bypassing any F1/TP/FP analysis.
-
-    Uses encode_feat_subset with all features and normalize_features=True so that
-    activations are on the same scale as the rest of the pipeline.
+    Stores sufficient statistics so that annotation enrichment for any concept
+    can be queried instantly without running the SAE again.
     """
     dict_size = sae.dict_size
     all_feats = list(range(dict_size))
 
-    concept_sum = np.zeros(dict_size, dtype=np.float64)
-    background_sum = np.zeros(dict_size, dtype=np.float64)
-    concept_count = 0
-    background_count = 0
+    first_annot = None
+    for shard in shards:
+        p = annot_dir / f"shard_{shard}" / "aa_concepts.npz"
+        if p.exists():
+            first_annot = load_npz(p)
+            break
+    if first_annot is None:
+        raise FileNotFoundError("No annotation files found in any shard")
+    n_raw_concepts = first_annot.shape[1]
 
-    for shard in tqdm(shards, desc="Enrichment pass"):
+    concept_sum = np.zeros((n_raw_concepts, dict_size), dtype=np.float64)
+    concept_count = np.zeros(n_raw_concepts, dtype=np.int64)
+    total_sum = np.zeros(dict_size, dtype=np.float64)
+    total_count = 0
+    processed_shards = []
+
+    for shard in tqdm(shards, desc="Building enrichment cache"):
         emb_path = embed_dir / f"shard_{shard}" / "embeddings.pt"
         annot_path = annot_dir / f"shard_{shard}" / "aa_concepts.npz"
         if not emb_path.exists() or not annot_path.exists():
             print(f"  Skipping shard {shard}: missing data")
             continue
+        processed_shards.append(shard)
 
         bundle = torch.load(emb_path, map_location="cpu", weights_only=False)
-        emb = bundle["embeddings"]  # (n_aa, d_model) fp16
+        emb = bundle["embeddings"]
         labels_sparse = load_npz(annot_path)
-        label_col = labels_sparse[:, raw_concept_col].toarray().ravel()
         n_aa = emb.shape[0]
 
         with torch.no_grad():
@@ -150,24 +166,81 @@ def compute_annotation_enrichment(
                 e = emb[s : s + chunk_size].to(device).float()
                 acts = sae.encode_feat_subset(e, all_feats, normalize_features=True)
                 acts_np = acts.cpu().numpy().astype(np.float64)
-                lab = label_col[s : s + chunk_size] > 0
 
-                if lab.any():
-                    concept_sum += acts_np[lab].sum(axis=0)
-                    concept_count += int(lab.sum())
-                not_lab = ~lab
-                if not_lab.any():
-                    background_sum += acts_np[not_lab].sum(axis=0)
-                    background_count += int(not_lab.sum())
+                labels_chunk = labels_sparse[s : s + chunk_size]
+                labels_bin = (labels_chunk > 0).astype(np.float64)
 
-    if concept_count == 0:
+                concept_sum += labels_bin.T @ acts_np
+                total_sum += acts_np.sum(axis=0)
+                total_count += acts_np.shape[0]
+                concept_count += np.asarray(labels_bin.sum(axis=0)).ravel().astype(np.int64)
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        cache_path,
+        concept_sum=concept_sum,
+        concept_count=concept_count,
+        total_sum=total_sum,
+        total_count=np.array([total_count], dtype=np.int64),
+        processed_shards=np.array(processed_shards, dtype=np.int64),
+        dict_size=np.array([dict_size], dtype=np.int64),
+        sae_model_name=np.array([sae_model_name]),
+        annot_dir=np.array([str(Path(annot_dir).resolve())]),
+    )
+    print(f"Enrichment cache saved to {cache_path} "
+          f"({cache_path.stat().st_size / 1e6:.1f} MB)")
+    return cache_path
+
+
+def load_enrichment_cache(
+    cache_path: Path,
+    expected_dict_size: int,
+    expected_shards: Optional[List[int]] = None,
+) -> dict:
+    """Load and validate a precomputed enrichment cache."""
+    data = np.load(cache_path, allow_pickle=False)
+    stored_dict_size = int(data["dict_size"][0])
+    if stored_dict_size != expected_dict_size:
+        raise ValueError(
+            f"Cache dict_size={stored_dict_size} != expected {expected_dict_size}"
+        )
+    if expected_shards is not None:
+        stored = set(data["processed_shards"].tolist())
+        expected = set(expected_shards)
+        if stored != expected:
+            raise ValueError(
+                f"Cache shards {sorted(stored)} != expected {sorted(expected)}"
+            )
+    return {
+        "concept_sum": data["concept_sum"],
+        "concept_count": data["concept_count"],
+        "total_sum": data["total_sum"],
+        "total_count": int(data["total_count"][0]),
+    }
+
+
+def query_enrichment_cache(
+    raw_concept_col: int,
+    cache: dict,
+    top_k_features: int = 20,
+) -> pd.DataFrame:
+    """Query precomputed cache for a single concept's enrichment statistics."""
+    concept_sum = cache["concept_sum"]
+    concept_count = cache["concept_count"]
+    total_sum = cache["total_sum"]
+    total_count = cache["total_count"]
+    dict_size = concept_sum.shape[1]
+
+    cc = int(concept_count[raw_concept_col])
+    if cc == 0:
         raise RuntimeError(
-            "No concept-annotated residues found in evaluated shards. "
-            "Check that the raw_concept_col and shard list are correct."
+            "No concept-annotated residues found in cache for this concept. "
+            "Check that the raw_concept_col is correct."
         )
 
-    mean_concept = concept_sum / concept_count
-    mean_background = background_sum / max(background_count, 1)
+    mean_concept = concept_sum[raw_concept_col] / cc
+    bg_count = total_count - cc
+    mean_background = (total_sum - concept_sum[raw_concept_col]) / max(bg_count, 1)
     enrichment = mean_concept / (mean_background + 1e-8)
 
     df = pd.DataFrame(
@@ -178,12 +251,69 @@ def compute_annotation_enrichment(
             "enrichment_ratio": enrichment,
         }
     )
-    df["n_concept_residues"] = concept_count
-    df["n_background_residues"] = background_count
+    df["n_concept_residues"] = cc
+    df["n_background_residues"] = bg_count
     return (
         df.sort_values("enrichment_ratio", ascending=False)
         .head(top_k_features)
         .reset_index(drop=True)
+    )
+
+
+def augment_with_f1(
+    enrich_df: pd.DataFrame,
+    concept_name: str,
+    f1_csv: Path,
+) -> pd.DataFrame:
+    """Merge F1 stats from the concept F1 CSV into enrichment results."""
+    if not f1_csv.exists():
+        return enrich_df
+    usecols = ["concept", "feature", "f1_per_domain", "f1", "precision", "recall"]
+    f1_df = pd.read_csv(f1_csv, usecols=usecols)
+    f1_concept = f1_df[f1_df["concept"] == concept_name].copy()
+    if f1_concept.empty:
+        return enrich_df
+    best = f1_concept.sort_values("f1_per_domain", ascending=False).drop_duplicates("feature")
+    best = best[["feature", "f1_per_domain", "f1", "precision", "recall"]]
+    return enrich_df.merge(best, on="feature", how="left")
+
+
+def get_or_build_enrichment_cache(
+    sae,
+    embed_dir: Path,
+    annot_dir: Path,
+    shards: List[int],
+    sae_dir: Path,
+    device: str = "cuda:0",
+    chunk_size: int = 2048,
+    sae_model_name: str = "ae_normalized.pt",
+) -> dict:
+    """Load enrichment cache if valid, otherwise build it."""
+    cache_path = sae_dir / "rank_eval" / "enrichment_cache.npz"
+    if cache_path.exists():
+        try:
+            cache = load_enrichment_cache(
+                cache_path,
+                expected_dict_size=sae.dict_size,
+            )
+            print(f"Loaded enrichment cache from {cache_path}")
+            return cache
+        except ValueError as exc:
+            print(f"Cache invalid ({exc}), rebuilding...")
+
+    precompute_enrichment_cache(
+        sae=sae,
+        embed_dir=embed_dir,
+        annot_dir=annot_dir,
+        shards=shards,
+        cache_path=cache_path,
+        device=device,
+        chunk_size=chunk_size,
+        sae_model_name=sae_model_name,
+    )
+    return load_enrichment_cache(
+        cache_path,
+        expected_dict_size=sae.dict_size,
     )
 
 
@@ -389,7 +519,7 @@ def run_rank_eval_for_concept(
 
 def _discovery_stats_from_row(row: pd.Series) -> dict:
     if "enrichment_ratio" in row.index:
-        return {
+        stats = {
             "source": "annotation_enrichment",
             "mean_act_at_concept": float(row.get("mean_act_at_concept", float("nan"))),
             "mean_act_at_background": float(
@@ -398,6 +528,12 @@ def _discovery_stats_from_row(row: pd.Series) -> dict:
             "enrichment_ratio": float(row.get("enrichment_ratio", float("nan"))),
             "n_concept_residues": int(row.get("n_concept_residues", 0)),
         }
+        if "f1_per_domain" in row.index and pd.notna(row.get("f1_per_domain")):
+            stats["f1_per_domain"] = float(row["f1_per_domain"])
+            stats["f1"] = float(row.get("f1", float("nan")))
+            stats["precision"] = float(row.get("precision", float("nan")))
+            stats["recall"] = float(row.get("recall", float("nan")))
+        return stats
     return {
         "source": "f1_guided",
         "f1_per_domain": float(row.get("f1_per_domain", float("nan"))),
