@@ -219,7 +219,7 @@ def process_shard(
     per_token_labels: Union[np.ndarray, sparse.spmatrix],
     threshold_percents: List[float],
     is_aa_concept_list: List[bool],
-    token_chunk_size: int = 4096,
+    token_chunk_size: int = 4096 * 4,
     # kept for API compatibility, no longer used
     feat_chunk_max: int = 512,
     is_sparse: bool = True,

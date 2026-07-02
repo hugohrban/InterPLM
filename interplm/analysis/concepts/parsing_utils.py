@@ -13,6 +13,7 @@ _TRAILING_INDEX_RE = re.compile(r'\s+\d+$')
 
 
 def normalize_note(note: str) -> str:
+    return note
     return _TRAILING_INDEX_RE.sub("", note)
 
 

@@ -79,7 +79,8 @@ def expand_features(
         current_index = {cat: 1 for cat in category_options}
         logger.info(f"Processing categorical column: {col}")
 
-        separator_name = categorical_separators.get(col, "note")
+        # separator_name = categorical_separators.get(col, "note")
+        separator_name = "note"
 
         # Handle case where this shard has no data for this column
         if df[col].isnull().all():

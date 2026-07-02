@@ -36,6 +36,7 @@ import pandas as pd
 import yaml
 
 from interplm.analysis.concepts.calculate_f1 import combine_metrics_across_shards
+# from interplm.analysis.concepts.compare_activations_old import analyze_all_shards_in_set
 from interplm.analysis.concepts.compare_activations import analyze_all_shards_in_set
 from interplm.analysis.concepts.report_metrics import report_metrics, report_valid_metrics
 from interplm.sae.normalize import normalize_sae_features
@@ -273,7 +274,7 @@ def run_sae(
         print(f"  [{name}] {step} ... {suffix}")
 
     # Step 1 — Normalize
-    if not force and (sae_dir / "ae_normalized.pt").exists():
+    if "pretrained" in sae_dir.name or (not force and (sae_dir / "ae_normalized.pt").exists()):
         log("normalize", skipped=True)
     else:
         print(f"  [{name}] normalize ...")

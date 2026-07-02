@@ -69,7 +69,7 @@ def make_eval_subset(
 
     for eval_name, eval_shards in eval_sets:
         for i in eval_shards:
-            res = sparse.load_npz(uniprot_dir / f"shard_{i}/aa_concepts.npz").toarray()
+            res = sparse.load_npz(uniprot_dir / f"shard_{i}/aa_concepts.npz").toarray() # shape: (num_tokens, num_concepts)
             # Count the number of non-zero values in each column
             aa_counts_per_concept[eval_name] += np.count_nonzero(res, axis=0).tolist()
             # Count the max number value in each column (i.e. the number of domains as each domain can span
