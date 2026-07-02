@@ -163,23 +163,43 @@ def make_steering_hook(
     feature_specs: list[tuple[int, float]],
     mode: str,
     use_error: bool,
+    steer_from_pos: int = 0,
 ) -> callable:
     """
     Returns a forward hook that intercepts a layer's hidden state and steers
     one or more features. `feature_specs` is a list of (feature_id, raw_value)
     pairs; all features are modified with the same `mode`.
+
+    `steer_from_pos` controls which token positions are steered: positions
+    0..(steer_from_pos-1) are passed through unchanged, only positions
+    steer_from_pos..seq_len-1 are encoded/modified/decoded. Set to the
+    initial prefix length so the input prompt is never steered.
     """
     def hook_fn(module, input, output):
         # ln_f returns a bare tensor; all other blocks return a tuple
         is_tuple = isinstance(output, tuple)
         h = output[0] if is_tuple else output      # [batch, seq_len, d_model]
-        orig_shape = h.shape
-        flat_h = h.reshape(-1, orig_shape[-1])     # [N, d_model]
+        batch_size, seq_len, d_model = h.shape
 
-        acts = sae.encode(flat_h)                  # [N, n_features], raw values
+        # Absolute position of this chunk's first token. With KV caching, after
+        # the prefix is processed the chunk is a single new token whose absolute
+        # position is tracked via hook_fn.token_offset. Without caching the full
+        # sequence is re-fed every step and token_offset stays 0, recovering the
+        # original behaviour.
+        offset = getattr(hook_fn, "token_offset", 0)
+        # Local index within this chunk where steering begins.
+        pos_start = steer_from_pos - offset
+        if pos_start < 0:
+            pos_start = 0
+        if pos_start >= seq_len:
+            # Entire chunk is still inside the unsteered prefix; nothing to do.
+            return output
+
+        flat_h = h[:, pos_start:, :].reshape(-1, d_model)  # [N_new, d_model]
+        acts = sae.encode(flat_h)                           # [N_new, n_features]
 
         if use_error:
-            error = flat_h - sae.decode(acts.clone())  # SAE residual
+            error = flat_h - sae.decode(acts)  # SAE residual; acts unmodified here
 
         for feature_id, raw_steer_value in feature_specs:
             if mode == "clamp":
@@ -195,9 +215,17 @@ def make_steering_hook(
         if use_error:
             h_steered = h_steered + error
 
-        h_steered = h_steered.reshape(orig_shape).to(h.dtype)
-        return (h_steered,) + output[1:] if is_tuple else h_steered
+        h_steered = h_steered.reshape(batch_size, seq_len - pos_start, d_model).to(h.dtype)
+        if pos_start > 0:
+            h_out = torch.cat([h[:, :pos_start, :], h_steered], dim=1)
+        else:
+            h_out = h_steered
 
+        return (h_out,) + output[1:] if is_tuple else h_out
+
+    # Absolute position of the first token in the chunk currently being fed to
+    # the model. The generation loop updates this when KV caching is on.
+    hook_fn.token_offset = 0
     return hook_fn
 
 
@@ -247,6 +275,7 @@ def generate_one(
     collect_debug: bool = False,
     vocab: Optional[dict] = None,
     verbose: bool = False,
+    use_cache: bool = True,
 ) -> tuple[str, list[dict]]:
     """
     Generate one sequence, optionally with a steering hook active throughout.
@@ -255,6 +284,15 @@ def generate_one(
     without any SAE intervention (mode="none").
 
     Returns (sequence, debug_steps) where debug_steps is [] when collect_debug=False.
+
+    With use_cache=True (default) the model's attention KV cache is reused across
+    steps: the full prefix is processed once, then only the single newest token is
+    fed each step (model(input_ids=x, past_key_values=past)). With use_cache=False
+    the full growing sequence is re-fed every step — slower, kept as a correctness
+    reference. The two paths are numerically equivalent because the steering hook
+    modifies a layer's *output*, which only affects deeper layers; each token's
+    hidden state at the steered layer is therefore a fixed function of the original
+    tokens, so steering it once (cached) equals re-steering it every step.
 
     Note: uses a simple left-to-right loop rather than model.generate()
     because the latter is incompatible with ProGen2's remote config.
@@ -268,18 +306,45 @@ def generate_one(
     inv_vocab = {v: k for k, v in vocab.items()} if vocab else {}
     steered = layer_module is not None and hook_fn is not None
     handle = layer_module.register_forward_hook(hook_fn) if steered else None
+
+    # KV cache state. `x` is the chunk fed to the model on each step: the full
+    # prefix on the first step, then a single new token. `past` holds the cached
+    # attention K/V. `past_base` is a parallel cache for the unsteered base pass
+    # used only when collect_debug is True (it is fed the same chosen tokens but
+    # never sees the steering hook).
+    past = None
+    past_base = None
+    x = ids
+    x_base = ids
+    if steered:
+        hook_fn.token_offset = 0
     try:
         with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False, disable=not verbose) as pbar:
             for step in range(max_new_tokens):
                 with torch.no_grad():
-                    logits_steered = model(input_ids=ids).logits[0, -1]   # [vocab_size]
+                    if use_cache:
+                        out = model(input_ids=x, past_key_values=past, use_cache=True)
+                        past = out.past_key_values
+                        if past is None:
+                            raise RuntimeError(
+                                "Model did not return past_key_values; KV caching is "
+                                "unsupported for this model. Re-run with use_cache=False."
+                            )
+                        logits_steered = out.logits[0, -1]                # [vocab_size]
+                    else:
+                        logits_steered = model(input_ids=ids).logits[0, -1]
 
                 if collect_debug:
                     # Base logits — temporarily remove hook for one clean forward pass
                     if steered:
                         handle.remove()
                     with torch.no_grad():
-                        logits_base = model(input_ids=ids).logits[0, -1]
+                        if use_cache:
+                            out_base = model(input_ids=x_base, past_key_values=past_base, use_cache=True)
+                            past_base = out_base.past_key_values
+                            logits_base = out_base.logits[0, -1]
+                        else:
+                            logits_base = model(input_ids=ids).logits[0, -1]
                     if steered:
                         handle = layer_module.register_forward_hook(hook_fn)
 
@@ -317,6 +382,13 @@ def generate_one(
                     })
 
                 ids = torch.cat([ids, next_id], dim=1)
+                if use_cache:
+                    # Next step feeds only the newest token; advance the hook's
+                    # absolute-position offset so it steers this generated token.
+                    x = next_id
+                    x_base = next_id
+                    if steered:
+                        hook_fn.token_offset = ids.shape[1] - 1
                 pbar.update(1)
                 if next_id.item() == eos_token_id:
                     break
@@ -348,6 +420,7 @@ def generate_batch(
     collect_debug: bool = False,
     vocab: Optional[dict] = None,
     verbose: bool = False,
+    use_cache: bool = True,
 ) -> tuple[list[str], list[list[dict]]]:
     """
     Generate `batch_size` sequences in parallel, optionally with a steering hook.
@@ -356,6 +429,10 @@ def generate_batch(
     reach EOS early are frozen while the rest of the batch continues. Returns
     (sequences, debug_steps_per_seq); debug_steps_per_seq[i] is empty when
     collect_debug=False.
+
+    use_cache mirrors generate_one: True (default) reuses the attention KV cache
+    and feeds only the newest token each step; False re-feeds the full sequence
+    every step as a correctness reference. The two are numerically equivalent.
     """
     seq_str = ("1" + prefix) if prefix else "1"
     single_ids = tokenizer(seq_str, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
@@ -369,6 +446,14 @@ def generate_batch(
 
     batch_debug: list[list[dict]] = [[] for _ in range(batch_size)]
 
+    # KV cache state (see generate_one for details).
+    past = None
+    past_base = None
+    x = ids
+    x_base = ids
+    if steered:
+        hook_fn.token_offset = 0
+
     try:
         with tqdm(total=max_new_tokens, desc="tokens", unit="tok", leave=False, disable=not verbose) as pbar:
             for step in range(max_new_tokens):
@@ -376,13 +461,28 @@ def generate_batch(
                     break
 
                 with torch.no_grad():
-                    logits_steered = model(input_ids=ids).logits[:, -1]  # [B, vocab]
+                    if use_cache:
+                        out = model(input_ids=x, past_key_values=past, use_cache=True)
+                        past = out.past_key_values
+                        if past is None:
+                            raise RuntimeError(
+                                "Model did not return past_key_values; KV caching is "
+                                "unsupported for this model. Re-run with use_cache=False."
+                            )
+                        logits_steered = out.logits[:, -1]               # [B, vocab]
+                    else:
+                        logits_steered = model(input_ids=ids).logits[:, -1]
 
                 if collect_debug:
                     if steered:
                         handle.remove()
                     with torch.no_grad():
-                        logits_base = model(input_ids=ids).logits[:, -1]
+                        if use_cache:
+                            out_base = model(input_ids=x_base, past_key_values=past_base, use_cache=True)
+                            past_base = out_base.past_key_values
+                            logits_base = out_base.logits[:, -1]
+                        else:
+                            logits_base = model(input_ids=ids).logits[:, -1]
                     if steered:
                         handle = layer_module.register_forward_hook(hook_fn)
 
@@ -426,6 +526,11 @@ def generate_batch(
                         })
 
                 ids = torch.cat([ids, next_ids], dim=1)
+                if use_cache:
+                    x = next_ids
+                    x_base = next_ids
+                    if steered:
+                        hook_fn.token_offset = ids.shape[1] - 1
                 finished |= (next_ids.squeeze(1) == eos_token_id)
                 pbar.update(1)
     finally:
@@ -652,6 +757,7 @@ def main(
     max_new_tokens: int = 200,
     temperature: float = 1.0,
     do_sample: bool = True,
+    use_cache: bool = True,
     use_normalized_sae: bool = True,
     seed: Optional[int] = None,
     device: Optional[str] = None,
@@ -692,6 +798,10 @@ def main(
         max_new_tokens: Maximum tokens to generate per sequence.
         temperature: Sampling temperature (ignored when do_sample=False).
         do_sample: Sample from the distribution; if False, use greedy decoding.
+        use_cache: Reuse the attention KV cache across generation steps (feed only
+            the newest token each step instead of re-running the full sequence).
+            Numerically equivalent to use_cache=False but much faster; disable
+            only to fall back to the reference path for debugging.
         use_normalized_sae: Load ae_normalized.pt (has activation_rescale_factor
             populated). Falls back to ae.pt when False.
         seed: Optional random seed for reproducibility.
@@ -777,11 +887,18 @@ def main(
         verify_hook_target(model, layer_module, layer_idx, tokenizer, device)
         use_error = steering_method == "with_error"
 
+        # Compute the initial prompt length so the hook skips prefix positions.
+        _prefix_str = ("1" + prefix) if prefix else "1"
+        _initial_seq_len = tokenizer(
+            _prefix_str, add_special_tokens=False, return_tensors="pt"
+        ).input_ids.shape[1]
+
         hook_fn = make_steering_hook(
             sae=sae,
             feature_specs=raw_feature_specs,
             mode=mode,
             use_error=use_error,
+            steer_from_pos=_initial_seq_len,
         )
 
     eos_token_id = _get_eos_token_id(tokenizer)
@@ -813,6 +930,7 @@ def main(
                 collect_debug=collect_debug,
                 vocab=vocab,
                 verbose=verbose,
+                use_cache=use_cache,
             )
         else:
             seq, debug_steps = generate_one(
@@ -829,6 +947,7 @@ def main(
                 collect_debug=collect_debug,
                 vocab=vocab,
                 verbose=verbose,
+                use_cache=use_cache,
             )
             batch_seqs, batch_debug = [seq], [debug_steps]
 
@@ -855,8 +974,10 @@ def main(
         feat_file_tag = feat_header_tag
         value_tag = "_".join(f"{fid}x{cv:.4f}" for fid, cv in feat_clamp_pairs) + suffix
 
+    sae_name = Path(sae_dir).name
+    prefix_tag_hdr = f"|prefix_{prefix[:6]}" if prefix else ""
     headers = [
-        f"steered_{i}|{feat_header_tag}|{mode}|{steering_method}|value_{value_tag}|nll={nll:.2f}|ppl={ppl:.2f}"
+        f"steered_{i}|sae_{sae_name}|{feat_header_tag}|{mode}|{steering_method}|value_{value_tag}{prefix_tag_hdr}|nll={nll:.2f}|ppl={ppl:.2f}"
         for i, (nll, ppl) in enumerate(scores)
     ]
     if output_fasta is None:

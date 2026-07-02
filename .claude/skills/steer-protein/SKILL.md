@@ -18,7 +18,7 @@ This document describes how to use the InterPLM codebase to steer progen2-large 
 - Checkpoint file: `ae_normalized.pt` (use this, not `ae.pt`)
 - Config: `config.yaml` (records `model_name`, `layer_idx`, activation dim, etc.)
 
-**Steering mechanism:** A forward hook intercepts the hidden state at the SAE's layer, encodes it, modifies one or more feature activations, then decodes back to the residual stream. All experiments here use `--steering_method direct` (full replacement) and `--mode clamp` (set feature to a fixed value).
+**Steering mechanism:** A forward hook intercepts the hidden state at the SAE's layer, encodes it, modifies one or more feature activations, then decodes back to the residual stream. experiments here can use `--steering_method direct` (full replacement) or `--steering_method with_error` (adding the difference between the reconstruction and tru values, may be good if the SAE has high reconstruction loss), it is good to compare both steering methods. and `--mode clamp` (set feature to a fixed value).
 
 ---
 
