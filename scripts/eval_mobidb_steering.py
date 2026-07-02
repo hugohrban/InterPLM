@@ -116,6 +116,21 @@ def aa_composition(seq: str) -> dict:
     return {grp: sum(seq.count(aa) for aa in aas) / n for grp, aas in AA_GROUPS.items()}
 
 
+def diversity_stats(seq: str) -> tuple[int, int]:
+    """Return (unique_aa_count, max_homopolymer_run) for a sequence."""
+    unique = len(set(seq))
+    if not seq:
+        return 0, 0
+    max_run, run = 1, 1
+    for i in range(1, len(seq)):
+        if seq[i] == seq[i - 1]:
+            run += 1
+            max_run = max(max_run, run)
+        else:
+            run = 1
+    return unique, max_run
+
+
 def summarize(label: str, fasta_path: Path, mobidb_out_path: Path, seqs: list, nlls: list):
     annotations = parse_mobidb_output(mobidb_out_path)
     # Map clean seq ids back to positions
@@ -125,6 +140,7 @@ def summarize(label: str, fasta_path: Path, mobidb_out_path: Path, seqs: list, n
 
     dis_fracs, has_disorder, has_neg_poly, has_polar = [], [], [], []
     comp_acidic, comp_basic, comp_polar_aa, comp_gly, comp_pro = [], [], [], [], []
+    unique_counts, max_runs = [], []
 
     for i, seq in enumerate(clean_seqs):
         sid = f"seq{i}"
@@ -139,6 +155,9 @@ def summarize(label: str, fasta_path: Path, mobidb_out_path: Path, seqs: list, n
         comp_polar_aa.append(comp["polar"])
         comp_gly.append(comp["gly"])
         comp_pro.append(comp["pro"])
+        u, mr = diversity_stats(seq)
+        unique_counts.append(u)
+        max_runs.append(mr)
 
     nlls_arr = np.array([x for x in nlls if not np.isnan(x)])
     lengths = [len("".join(c for c in s if c in valid_aa)) for s in seqs if len("".join(c for c in s if c in valid_aa)) >= 20]
@@ -148,6 +167,8 @@ def summarize(label: str, fasta_path: Path, mobidb_out_path: Path, seqs: list, n
     print(f"{'='*60}")
     print(f"  NLL (mean±std):     {nlls_arr.mean():.3f} ± {nlls_arr.std():.3f}")
     print(f"  Length (mean):      {np.mean(lengths):.1f}")
+    print(f"  Unique AAs (mean):  {np.mean(unique_counts):.1f}")
+    print(f"  Max run (mean):     {np.mean(max_runs):.1f}")
     print(f"  % any disorder:     {100*np.mean(has_disorder):.1f}%")
     print(f"  Disorder fraction:  {100*np.mean(dis_fracs):.1f}% of residues")
     print(f"  % Neg Polyelectr.:  {100*np.mean(has_neg_poly):.1f}%")
@@ -162,6 +183,8 @@ def summarize(label: str, fasta_path: Path, mobidb_out_path: Path, seqs: list, n
         "label": label, "n": n,
         "nll_mean": float(nlls_arr.mean()), "nll_std": float(nlls_arr.std()),
         "mean_length": float(np.mean(lengths)),
+        "unique_aa_mean": float(np.mean(unique_counts)),
+        "max_run_mean": float(np.mean(max_runs)),
         "pct_disorder": float(100*np.mean(has_disorder)),
         "disorder_frac": float(100*np.mean(dis_fracs)),
         "pct_neg_poly": float(100*np.mean(has_neg_poly)),
@@ -204,13 +227,17 @@ def run_condition_prefix_split(label: str, fasta_path: Path, tmpdir: Path, prefi
 
     # Disorder stats for continuation only (residues > prefix_len)
     cont_dis_fracs, cont_has_neg_poly = [], []
+    cont_unique_counts, cont_max_runs = [], []
     for i, seq in enumerate(clean_seqs):
         sid = f"seq{i}"
         ann = annotations.get(sid, {})
         cont_len = max(len(seq) - prefix_len, 0)
+        cont = seq[prefix_len:]
         if cont_len == 0:
             cont_dis_fracs.append(0.0)
             cont_has_neg_poly.append(0)
+            cont_unique_counts.append(0)
+            cont_max_runs.append(0)
             continue
         # Count disorder residues in continuation
         covered = set()
@@ -221,6 +248,9 @@ def run_condition_prefix_split(label: str, fasta_path: Path, tmpdir: Path, prefi
         cont_dis_fracs.append(len(covered) / cont_len)
         neg_poly_in_cont = any(start > prefix_len for start, end in ann.get("Negative Polyelectrolyte", []))
         cont_has_neg_poly.append(1 if neg_poly_in_cont else 0)
+        u, mr = diversity_stats(cont)
+        cont_unique_counts.append(u)
+        cont_max_runs.append(mr)
 
     nlls_arr = np.array([x for x in nlls if not np.isnan(x)])
     lengths = [len(s) for s in clean_seqs]
@@ -232,23 +262,31 @@ def run_condition_prefix_split(label: str, fasta_path: Path, tmpdir: Path, prefi
     print(f"  NLL (mean±std):            {nlls_arr.mean():.3f} ± {nlls_arr.std():.3f}")
     print(f"  Total length (mean):       {np.mean(lengths):.1f}")
     print(f"  Continuation length (mean):{np.mean(cont_lengths):.1f}")
+    print(f"  Unique AAs cont (mean):    {np.mean(cont_unique_counts):.1f}")
+    print(f"  Max run cont (mean):       {np.mean(cont_max_runs):.1f}")
     print(f"  Continuation disorder frac:{100*np.mean(cont_dis_fracs):.1f}%")
     print(f"  % Neg Polyelectr (cont):   {100*np.mean(cont_has_neg_poly):.1f}%")
 
     # AA composition of continuation only
-    comp_acidic_cont = []
+    comp_acidic_cont, comp_pro_cont = [], []
     for seq in clean_seqs:
         cont = seq[prefix_len:]
         if cont:
             comp_acidic_cont.append(sum(cont.count(c) for c in "DE") / len(cont))
+            comp_pro_cont.append(cont.count("P") / len(cont))
     print(f"  D+E fraction (cont):       {100*np.mean(comp_acidic_cont):.1f}%")
+    print(f"  P fraction (cont):         {100*np.mean(comp_pro_cont):.1f}%")
 
     return {
         "label": label, "n": n, "prefix_len": prefix_len,
         "nll_mean": float(nlls_arr.mean()),
+        "cont_length_mean": float(np.mean(cont_lengths)),
+        "cont_unique_aa_mean": float(np.mean(cont_unique_counts)),
+        "cont_max_run_mean": float(np.mean(cont_max_runs)),
         "cont_disorder_frac": float(100*np.mean(cont_dis_fracs)),
         "pct_neg_poly_cont": float(100*np.mean(cont_has_neg_poly)),
         "comp_acidic_cont": float(100*np.mean(comp_acidic_cont)) if comp_acidic_cont else 0.0,
+        "comp_pro_cont": float(100*np.mean(comp_pro_cont)) if comp_pro_cont else 0.0,
     }
 
 
@@ -259,6 +297,8 @@ def main():
     p.add_argument("--tmpdir", type=Path, default=Path("steering_experiments/compositional_bias/mobidb"))
     p.add_argument("--prefix_len", type=int, default=0,
                    help="If >0, also report disorder stats for the continuation (residues after prefix_len)")
+    p.add_argument("--output_json", type=Path, default=None,
+                   help="Path to write JSON summary (default: tmpdir/summary.json)")
     args = p.parse_args()
 
     args.tmpdir.mkdir(parents=True, exist_ok=True)
@@ -274,7 +314,7 @@ def main():
 
     if len(results) > 1:
         import json
-        out_json = args.tmpdir / "summary.json"
+        out_json = args.output_json if args.output_json else args.tmpdir / "summary.json"
         with open(out_json, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nSummary saved to {out_json}")
