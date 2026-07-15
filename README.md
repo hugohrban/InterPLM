@@ -1,6 +1,28 @@
 # InterPLM: Discovering Interpretable Features in Protein Language Models via Sparse Autoencoders
 ![Example feature activation patterns](https://github.com/user-attachments/assets/fc486fea-9303-45d3-aab2-9f9ceb51ac26)
 
+---
+
+## 🔱 This is a fork
+
+![Fork](https://img.shields.io/badge/status-fork-orange)
+
+**This repository is a fork of [ElanaPearl/InterPLM](https://github.com/ElanaPearl/InterPLM).**
+Everything added on top of the original is tracked in **[CHANGELOG.md](CHANGELOG.md)**.
+
+**Main additions in this fork:**
+- 🧬 ProGen2 support
+- 🎯 Activation steering (SAE feature intervention)
+- 🗺️ Concept Explorer & Protein Zoom dashboard modes
+- 🔬 Per-protein feature analysis
+- ⚡ Concept-analysis speedup (~24h → ~20min)
+- 🖥️ Multi-GPU, resumable embedding pipeline
+- ⚙️ CLI-driven SAE training
+
+**Pretrained SAEs for ProGen2-large (layer 24)**, ready to steer and explore in the dashboard, are on HuggingFace: [`k10`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k10) and [`k350`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k350).
+
+---
+
 InterPLM is a toolkit for extracting, analyzing, and visualizing interpretable features from protein language models (PLMs) using sparse autoencoders (SAEs). To learn more, check out [the paper in Nature Methods](https://www.nature.com/articles/s41592-025-02836-7) ([free preprint](https://www.biorxiv.org/content/10.1101/2024.11.14.623630v1)), or explore SAE features from every hidden layer of ESM-2-8M in our interactive dashboard, [InterPLM.ai](https://interPLM.ai).
 
 ## Key Features
@@ -279,6 +301,27 @@ The dashboard will show:
 - Top activating proteins for each feature
 - Concept associations (if Step 3 was completed)
 - Interactive feature exploration
+
+### 6. Activation Steering (Optional)
+
+Once you have a trained SAE, you can steer generation by clamping or ablating specific SAE features, biasing a PLM to produce proteins with a targeted property (e.g. a transit peptide or binding motif). This works on ProGen2 models by hooking a layer during generation, editing the SAE feature, and decoding back.
+
+```bash
+python scripts/activation_steering_naive.py \
+    --sae_dir trained_saes/best_progen_large_24 \
+    --feature_id 5900 \
+    --clamp_value 5.0 \
+    --mode clamp \
+    --steering_method direct \
+    --prefix M \
+    --n_sequences 512 \
+    --batch_size 256 \
+    --max_new_tokens 30 \
+    --seed 42 \
+    --output_fasta outputs/f5900x5.0.fasta
+```
+
+For the full workflow — finding candidate features for a concept, multi-feature steering, anti-target analysis, and evaluating steered outputs — see [`.claude/skills/steer-protein/SKILL.md`](.claude/skills/steer-protein/SKILL.md).
 
 Now you can scale up the training and concept-evaluation pipelines to explore a broader range of protein language model features. Increasing the training data, adjusting hyperparameters, and expanding the concept evaluation set will help identify features corresponding to other structural motifs, binding sites, and functional domains.
 
