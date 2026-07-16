@@ -7,7 +7,7 @@
 
 ![Fork](https://img.shields.io/badge/status-fork-orange)
 
-**This repository is a fork of [ElanaPearl/InterPLM](https://github.com/ElanaPearl/InterPLM).**
+**This repository is a fork of [https://github.com/ElanaPearl/InterPLM](https://github.com/ElanaPearl/InterPLM).**
 Everything added on top of the original is tracked in **[CHANGELOG.md](CHANGELOG.md)**.
 
 **Main additions in this fork:**
@@ -19,7 +19,7 @@ Everything added on top of the original is tracked in **[CHANGELOG.md](CHANGELOG
 - 🖥️ Multi-GPU, resumable embedding pipeline
 - ⚙️ CLI-driven SAE training
 
-**Pretrained SAEs for ProGen2-large (layer 24)**, ready to steer and explore in the dashboard, are on HuggingFace: [`k10`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k10) and [`k350`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k350).
+**Pretrained SAEs for ProGen2-large (layer 24)**, including the dashboard cache, ready to steer and explore in the dashboard, are on HuggingFace: [`k10`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k10) and [`k350`](https://huggingface.co/hugohrban/progen2_large_L24_SAE_k350).
 
 ---
 
